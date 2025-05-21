@@ -1,6 +1,6 @@
 <div align="center">
 <br>
-<img src="docs/showo_title.png" width="166">
+<img src="assets/title.png" width="166">
 <h3>Multimodal Large Diffusion Language Models</h3></div>
 
 <p align="center">
@@ -10,15 +10,15 @@
       alt="MMaDA Paper on arXiv"
     />
   </a>
-  <a href="https://huggingface.co/ByteDance-Seed/MMaDA-7B-MoT">
+  <a href="https://huggingface.co/spaces/Gen-Verse/MMaDA">
     <img 
-        src="https://img.shields.io/badge/MMaDA%20Space-Hugging%20Face%20Space-orange?logo=huggingface&logoColor=yellow" 
+        src="https://img.shields.io/badge/MMaDA%20Demo-Hugging%20Face%20Space-orange?logo=huggingface&logoColor=yellow" 
         alt="MMaDA on Hugging Face"
     />
   </a>
-  <a href="https://huggingface.co/ByteDance-Seed/MMaDA-7B-MoT">
+  <a href="https://huggingface.co/Gen-Verse/MMaDA-8B-Base">
     <img 
-        src="https://img.shields.io/badge/MMaDA%20Model-Hugging%20Face%20Model-orange?logo=huggingface&logoColor=yellow" 
+        src="https://img.shields.io/badge/MMaDA--8B--Base-Hugging%20Face%20Model-orange?logo=huggingface&logoColor=yellow" 
         alt="MMaDA on Hugging Face"
     />
   </a>
