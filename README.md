@@ -40,12 +40,12 @@ MMaDA is a novel class of **multimodal diffusion foundation models** designed to
 2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
 3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
-<!-- ## Decoding Demo
+## Decoding Demo
 We demonstrate the decoding process of MMaDA with a teaser video to show how a diffusion model generates text and image. The "Text Generation" part adopts a "semi-ar" sampling method and the "MultiModal Generation" part adopts a non-ar sampling method which is purely diffusion denoising.
 
 <div style="display: flex; justify-content: center; flex-wrap: wrap;">
-    <img src="assets/showcase.gif" style="width: 90%" />
-</div> -->
+    <img src="assets/showcase0.8.gif" style="width: 90%" />
+</div>
 
 
 ## MMaDA Series Overview
