@@ -43,10 +43,8 @@ MMaDA is a novel class of **multimodal diffusion foundation models** designed to
 ## Decoding Demo
 We demonstrate the decoding process of MMaDA with a teaser video to show how a diffusion model generates text and image. The "Text Generation" part adopts a "semi-ar" sampling method and the "MultiModal Generation" part adopts a non-ar sampling method which is purely diffusion denoising.
 
-<div align="center">
-<video width="800" controls>
-  <source src="assets/showcase.mp4" type="video/mp4">
-</video>
+<div style="display: flex; justify-content: center; flex-wrap: wrap;">
+    <img src="assets/showcase.gif" style="width: 90%" />
 </div>
 
 
