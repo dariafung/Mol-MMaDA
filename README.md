@@ -26,22 +26,35 @@
 
 
 ## Introduction
+
+<div align="center">
+<img src="assets/pipeline.png" width="800">
+<p><i>Overview of MMaDA's pipeline.</i></p>
+</div>
+
+<div align="center">
+<img src="assets/example_compare.png" width="800">
+<p><i>Overview of MMaDA's capablities.</i></p>
+</div>
+
+
+
 MMaDA is a novel class of **multimodal diffusion foundation models** designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation. MMaDA is distinguished by three key innovations:
 1. MMaDA adopts a **unified diffusion architecture** with a shared probabilistic formulation and a modality-agnostic design, eliminating the need for modality-specific components.
 2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
 3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
-## Model Overview
+## MMaDA Series Overview
 MMaDA is a series of multimodal diffusion models. We report three training stages in our paper, and each checkpoint after the stage are:
-1. MMaDA-8B-Base: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
-2. MMaDA-8B-MixCoT: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual and multimodal reasoning.
-3. MMaDA-8B-Max: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation.
+1. **MMaDA-8B-Base**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
+2. **MMaDA-8B-MixCoT**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual, multimodal and image generation reasoning. **Will be released in 2 weeks.**
+3. **MMaDA-8B-Max**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
 
 ## News
 
 
 * **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
-* **[2025-05-22]** We open source our MMaDA-8B-Base at Huggingface. MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the future.
+* **[2025-05-22]** We open source our MMaDA-8B-Base at Huggingface. MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
 * **[2025-05-22]** We release our research paper for the first unified multimodal diffusion model: MMaDA. 
 
 
@@ -54,10 +67,88 @@ First, set up the enviroment:
 ```
 pip install -r requirements.txt
 ```
-Lanuch the local gradio for three tasks:
+Lanuch the local gradio for sampling with three tasks:
 ```
 python app.py
 ```
-Or you can just experience it with our Huggingface Demo.
+Or you can just experience it with our [Huggingface Demo](https://huggingface.co/spaces/Gen-Verse/MMaDA).
+
+## Inference
+For batch-level inference, we provide our inference scripts here.
+### 1. Text Generation
+For text generation, we follow LLaDA's configuration and generation script. Simple run:
+```bash
+python generate.py
+```
+
+### 2. MultiModal Generation
+For multimodal generation and text-to-image generation, first login your wandb account:
+```
+wandb login
+```
+Inference demo for MultiModal Generation and you can view the results on wandb:
+```
+python3 inference_mmu.py config=configs/mmada_demo.yaml mmu_image_root=./mmu_validation question='Please describe this image in detail.' 
+```
+
+### 3. Text-to-Image Genertion
+For multimodal generation and text-to-image generation, first login your wandb account:
+```
+wandb login
+```
+Inference demo for Text-to-Image Genertion and you can view the results on wandb:
+```
+python3 inference_t2i.py config=configs/mmada_demo.yaml batch_size=1 validation_prompts_file=validation_prompts/text2image_prompts.txt guidance_scale=3.5 generation_timesteps=15
+mode='t2i'
+```
 
 ## Train
+**Prepare your training data and change the data path in `configs/xx.yaml`.**
+
+### Stage 0. Prepare your accelerate configs
+Please first prepare your accelerate configs. You can simple run
+```
+accelerate config
+```
+
+Or use our provided configs in `accelerate_configs`:
+```
+├── accelerate_configs/ 
+|   ├── 1_gpu.yaml
+|   └── 8_node_8_gpus_deepspeed_zero2.yaml (for 8 * 8 gpus)
+```
+
+### Stage 1.1: Pre-training on ImageNet
+First we use LLaDA-8B-Instruct to initialize our model, and train on ImageNet for basic visual capbalities. 
+```
+accelerate launch --config_file path/to/your/accelerate_config --main_process_port=8888 training/train_mmada.py config=configs/mmada_pretraining_stage1_llada_instruct.yaml
+```
+
+### Stage 1.2 Pre-training on Image-Text Dataset
+Then we replace the ImageNet dataset in Stage 1.1 with Image-Text Dataset. Please change the pretrained model path in `mmada_pretraining_stage2_llada_instruct.yaml` with your checkpoint in Stage 1.1
+```
+accelerate launch --config_file path/to/your/accelerate_config --main_process_port=8888 training/train_mmada_stage2.py config=configs/mmada_pretraining_stage2_llada_instruct.yaml
+```
+
+### Stage 1.3 Pre-training on Text Instruction following
+In this stage, we begin training on text instruction following and include corresponding validations. Please change the pretrained model path in `mmada_pretraining_stage3_llada_instruct.yaml` with your checkpoint in Stage 1.2
+```
+accelerate launch --config_file path/to/your/accelerate_config --main_process_port=8888 training/train_mmada_stage3.py config=configs/mmada_pretraining_stage3_llada_instruct.yaml
+```
+
+### Stage 2.1 Mix-CoT Training (Text Only)
+In this stage, we begin our Mix-CoT finetuning with text reasoning first, along with improved image quality. Please change the pretrained model path in `mmada_pretraining_stage3_llada_instruct.yaml` with your checkpoint in Stage 1.3 and prepare your CoT data.
+```
+accelerate launch --config_file path/to/your/accelerate_config --main_process_port=8888 training/train_mmada_stage_cot_sft.py config=configs/mmada_pretraining_stage3_llada_instruct_512_cot.yaml
+```
+
+### Stage 2.2 Mix-CoT Training (with MultiModal Reasoning)
+In this stage, we include multimodal reasoning, along with improved image quality. Please change the pretrained model path in `mmada_pretraining_stage3_llada_instruct.yaml` with your checkpoint in Stage 2.1 and prepare your CoT data.
+```
+accelerate launch --config_file path/to/your/accelerate_config --main_process_port=8888 training/train_mmada_stage4.py config=configs/mmada_pretraining_stage4_llada_instruct.yaml
+```
+
+### Stage 3 UniGRPO RL
+[Will be released once we finished our code transition to OpenRLHF]
+
+
