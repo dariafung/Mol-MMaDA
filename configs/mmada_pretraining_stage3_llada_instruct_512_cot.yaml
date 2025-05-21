@@ -63,7 +63,7 @@ dataset:
         external_clevr_caption_path: "/data_storage/shared/datasets/multimodal_cot/clevr/metadata.csv"
         external_docvqa_caption_path: "/data_storage/shared/datasets/multimodal_cot/docvqa/metadata.csv"
         external_geo_caption_path: "/data_storage/shared/datasets/multimodal_cot/geo/metadata.csv"
-        validation_prompts_file: "/data_storage/ty/Show-o/validation_prompts/text2image_prompts.txt"
+        validation_prompts_file: "validation_prompts/text2image_prompts.txt"
         mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
         mmu_validation_prompts_file: "/data_storage/ty/MMaDA/mmu_validation/prompts.jsonl"
         lm_chat_validation_jsonl: "/data_storage/ty/MMaDA/lm_chat_validation/questions.jsonl"

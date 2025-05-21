@@ -49,9 +49,9 @@ TOKENIZER = None
 DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
 MASK_ID = None 
 uni_prompting = None
-VQ_MODEL = MAGVITv2().from_pretrained("/data_storage/shared/pretrained_models/models--showlab--magvitv2").to(DEVICE)
+VQ_MODEL = MAGVITv2().from_pretrained("showlab/magvitv2").to(DEVICE)
 
-DEFAULT_MODEL_PATH = "/data_storage/lbw/MMaDA/mmada-training-stage3-llada-instruct-512-cot-uni/checkpoint-210000/unwrapped_model" # Default
+DEFAULT_MODEL_PATH = "Gen-Verse/MMaDA-8B-Base" # Default
 CURRENT_MODEL_PATH = None
 
 MODEL_CHOICES = [

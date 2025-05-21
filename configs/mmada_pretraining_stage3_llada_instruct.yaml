@@ -57,7 +57,7 @@ dataset:
         external_laion12m_caption_path: "/data_storage/ty/datasets/laion-aesthetics-12m-images-2"
         external_cc12m_caption_path: "/data_storage/shared/datasets/cc12m/new_captions"
         external_text_to_image_2M_512_caption_path: "/data_storage/shared/datasets/text-to-image-2M/data_512_2M_captions"
-        validation_prompts_file: "/data_storage/ty/Show-o/validation_prompts/text2image_prompts.txt"
+        validation_prompts_file: "validation_prompts/text2image_prompts.txt"
         mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
         lm_chat_validation_jsonl: "/data_storage/ty/MMaDA/lm_chat_validation/questions.jsonl"
         shuffle_buffer_size: 1000
