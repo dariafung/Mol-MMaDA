@@ -593,9 +593,10 @@ with gr.Blocks(css=css_styles, theme=theme) as demo:
 # with gr.Blocks() as demo:
     thinking_mode_lm = gr.State(False)
     thinking_mode_mmu = gr.State(False)
-    gr.Markdown("<h1 style='text-align: center; margin-bottom: 20px;'>MMaDA </h1>")
-    gr.Markdown("Interactively explore the step-by-step generation process of a diffusion language model. "
-                "The model begins with a fully masked sequence (except for the prompt) and progressively refines it by unmasking tokens.")
+    gr.Markdown("<h1 style='text-align: center; margin-bottom: 20px;'>MMaDA: Multimodal Large Diffusion Language Models</h1>")
+    gr.Markdown("MMaDA is a novel class of multimodal diffusion foundation models designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation")
+    gr.Markdown("Github: [Gen-Verse/MMaDA](https://github.com/Gen-Verse/MMaDA)")
+    gr.Markdown("Paper: [MMaDA: Multimodal Large Diffusion Language Models]()")
     gr.Markdown("### Select Model")
     with gr.Row():
         model_select_radio = gr.Radio(
