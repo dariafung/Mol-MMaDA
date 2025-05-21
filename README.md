@@ -27,10 +27,6 @@
 
 ## Introduction
 
-<div align="center">
-<img src="assets/pipeline.png" width="800">
-<p><i>Overview of MMaDA's pipeline.</i></p>
-</div>
 
 <div align="center">
 <img src="assets/example_compare.png" width="800">
@@ -162,3 +158,20 @@ accelerate launch --config_file path/to/your/accelerate_config --main_process_po
 [Will be released once we finished our code transition to OpenRLHF]
 
 
+## Citation
+```
+@article{yang2025mmada,
+  title   = {Multimodal Large Diffusion Language Models},
+  author  = {Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
+  journal = {arXiv preprint arXiv:2505.},
+  year    = {2025}
+}
+```
+
+## Discussion and Collaboration
+
+Welcome to discuss and collaborate with us for continuously improving MMaDA.
+Reach us with this WeChat QR code!
+<p align="center">
+<img src="assets/WX-mmada.jpeg" width="256">
+</p>
