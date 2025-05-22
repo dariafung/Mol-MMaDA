@@ -32,7 +32,7 @@ MMaDA is a new family of **multimodal diffusion foundation models** designed to 
 3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
 <div align="center" style="width: 600px; margin: auto;">
-  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="500" />
+  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="600" />
   <p style="font-style: italic; font-size: 14px; color: #555; margin-top: 6px;">
     MMaDA's decoding demo. This video showcases how a diffusion foundation model generates text and image.<br>
     The "Text Generation" part uses a semi-autoregressive sampling method, while the "Multimodal Generation" part adopts non-autoregressive diffusion denoising.
