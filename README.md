@@ -194,8 +194,9 @@ This work is heavily based on [Show-o](https://github.com/showlab/Show-o), [LLaD
 
 ## 💬 Discussion and Collaboration
 
-Welcome to discuss and collaborate with us for continuously improving MMaDA.
-Reach us with this WeChat QR code!
+Welcome to discuss and collaborate with us for continuously improving MMaDA. If you have any bad cases, please kindly share them in the [Issue](https://github.com/Gen-Verse/MMaDA/issues/4#issue-3083196081).
+
+Also, you can reach us with this WeChat QR code!
 <p align="center">
 <img src="assets/WX-mmada.jpeg" width="256">
 </p>
