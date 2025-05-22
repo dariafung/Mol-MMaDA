@@ -41,7 +41,7 @@ dataset:
         external_journeydb_caption_path: "/data_storage/shared/datasets/journeydb_anno/train_journeydb_anno.json"
         external_laion12m_caption_path: "/data_storage/shared/datasets/laion-aesthetic-12m-captions"
         external_cc12m_caption_path: "/data_storage/shared/datasets/cc12m/captions"
-        validation_prompts_file: "/data_storage/ty/Show-o/validation_prompts/imagenet_prompts.txt"
+        validation_prompts_file: "validation_prompts/imagenet_prompts.txt"
         shuffle_buffer_size: 1000
         num_workers: 32
         resolution: 512

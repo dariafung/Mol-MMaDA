@@ -435,10 +435,6 @@ def main():
 
     vq_model.to(device=accelerator.device)
 
-    # if hasattr(model, 'module'):
-    #     mask_dtype = model.module.showo.model.embed_tokens.weight.dtype
-    # else:
-    #     mask_dtype = model.showo.model.embed_tokens.weight.dtype  
     mask_dtype = model.get_input_embeddings().weight.dtype
 
     ##################################

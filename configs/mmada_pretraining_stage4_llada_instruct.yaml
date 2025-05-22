@@ -68,7 +68,7 @@ dataset:
         vqa_images_path: "/data_storage/shared/datasets/LLaVA-Instruct-150K-images"
         clevr2_images_path: "/data_storage/ty/datasets/Clevr_CoGenT_TrainA_70K_Complex/images"
         geo170k_images_path: "/data_storage/ty/shared/datasets/Geo170K/Geo170K/images"
-        validation_prompts_file: "/data_storage/ty/Show-o/validation_prompts/text2image_prompts.txt"
+        validation_prompts_file: "validation_prompts/text2image_prompts.txt"
         mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
         mmu_validation_prompts_file: "/data_storage/ty/MMaDA/mmu_validation/prompts_with_vqa.json"
         lm_chat_validation_jsonl: "/data_storage/ty/MMaDA/lm_chat_validation/questions.jsonl"

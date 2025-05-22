@@ -4,7 +4,7 @@
 <h3>Multimodal Large Diffusion Language Models</h3></div>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2505.14683">
+  <a href="https://arxiv.org/abs/2505.15809">
     <img
       src="https://img.shields.io/badge/MMaDA-Paper-red?logo=arxiv&logoColor=red"
       alt="MMaDA Paper on arXiv"
@@ -12,7 +12,7 @@
   </a>
   <a href="https://huggingface.co/spaces/Gen-Verse/MMaDA">
     <img 
-        src="https://img.shields.io/badge/MMaDA%20Demo-Hugging%20Face%20Space-orange?logo=huggingface&logoColor=yellow" 
+        src="https://img.shields.io/badge/MMaDA%20Demo-Hugging%20Face%20Space-blue?logo=huggingface&logoColor=blue" 
         alt="MMaDA on Hugging Face"
     />
   </a>
@@ -25,13 +25,51 @@
 </p>
 
 
-## Introduction
+## 🌌 Introduction
+MMaDA is a new family of **multimodal diffusion foundation models** designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation. MMaDA is distinguished by three key innovations:
+1. MMaDA adopts a **unified diffusion architecture** with a shared probabilistic formulation and a modality-agnostic design, eliminating the need for modality-specific components.
+2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
+3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
-<div align="center">
-<img src="assets/pipeline.png" width="800">
-<p><i>Overview of MMaDA's pipeline.</i></p>
+<div align="center" style="width: 600px; margin: auto;">
+  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="550" />
+  <p style="font-style: italic; font-size: 14px; color: #555; margin-top: 6px;">
+    MMaDA's decoding demo. This video showcases how a diffusion foundation model generates text and image.<br>
+    The "Text Generation" part uses a semi-autoregressive sampling method, while the "Multimodal Generation" part adopts non-autoregressive diffusion denoising.
+  </p>
 </div>
 
+
+
+
+
+
+
+<!--
+
+
+
+## Decoding Demo
+We demonstrate the decoding process of MMaDA with a teaser video to show how a diffusion model generates text and image. The "Text Generation" part adopts a "semi-autoregressive" sampling method and the "MultiModal Generation" part adopts a non-autoregressive sampling method which is purely diffusion denoising.
+
+<!-- <div style="display: flex; justify-content: center; flex-wrap: wrap;">
+    <img src="assets/showcase0.8.gif" style="width: 90%" />
+</div> -->
+
+## 📰 Latest Updates
+
+
+* **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
+* **[2025-05-22]** We open source our MMaDA-8B-Base at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
+* **[2025-05-22]** We release our [research paper](https://arxiv.org/abs/2505.15809) and [demo](https://huggingface.co/spaces/Gen-Verse/MMaDA) for the first unified multimodal diffusion model: MMaDA. 
+
+
+## 🧬 MMaDA Series Overview
+
+MMaDA includes a series of checkpoints reflecting different training stages:
+1. **MMaDA-8B-Base**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
+2. **MMaDA-8B-MixCoT (coming soon)**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual, multimodal and image generation reasoning. **Will be released in 2 weeks.**
+3. **MMaDA-8B-Max (coming soon)**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
 <div align="center">
 <img src="assets/example_compare.png" width="800">
 <p><i>Overview of MMaDA's capablities.</i></p>
@@ -39,41 +77,23 @@
 
 
 
-MMaDA is a novel class of **multimodal diffusion foundation models** designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation. MMaDA is distinguished by three key innovations:
-1. MMaDA adopts a **unified diffusion architecture** with a shared probabilistic formulation and a modality-agnostic design, eliminating the need for modality-specific components.
-2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
-3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
-## MMaDA Series Overview
-MMaDA is a series of multimodal diffusion models. We report three training stages in our paper, and each checkpoint after the stage are:
-1. **MMaDA-8B-Base**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
-2. **MMaDA-8B-MixCoT**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual, multimodal and image generation reasoning. **Will be released in 2 weeks.**
-3. **MMaDA-8B-Max**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
-
-## News
-
-
-* **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
-* **[2025-05-22]** We open source our MMaDA-8B-Base at Huggingface. MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
-* **[2025-05-22]** We release our research paper for the first unified multimodal diffusion model: MMaDA. 
-
-
-## TODO
+## ✅ TODO
 - [ ] Release  MMaDA-8B-MixCoT and MMaDA-8B-Max
 - [ ] Release OpenRLHF-based UniGRPO training code.
 
-## Quick Start
+## ⚙️ Quick Start
 First, set up the enviroment:
 ```
 pip install -r requirements.txt
 ```
-Lanuch the local gradio for sampling with three tasks:
+Launch local Gradio demo:
 ```
 python app.py
 ```
-Or you can just experience it with our [Huggingface Demo](https://huggingface.co/spaces/Gen-Verse/MMaDA).
+Or try it online via our [Huggingface Demo](https://huggingface.co/spaces/Gen-Verse/MMaDA).
 
-## Inference
+## 🚀 Inference
 For batch-level inference, we provide our inference scripts here.
 ### 1. Text Generation
 For text generation, we follow LLaDA's configuration and generation script. Simple run:
@@ -102,8 +122,8 @@ python3 inference_t2i.py config=configs/mmada_demo.yaml batch_size=1 validation_
 mode='t2i'
 ```
 
-## Train
-**Prepare your training data and change the data path in `configs/xx.yaml`.**
+## 🔧 Training
+**Update your training data path in `configs/xx.yaml`.**
 
 ### Stage 0. Prepare your accelerate configs
 Please first prepare your accelerate configs. You can simple run
@@ -152,3 +172,23 @@ accelerate launch --config_file path/to/your/accelerate_config --main_process_po
 [Will be released once we finished our code transition to OpenRLHF]
 
 
+## 📖 Citation
+```
+@article{yang2025mmada,
+  title   = {Multimodal Large Diffusion Language Models},
+  author  = {Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
+  journal = {arXiv preprint arXiv:2505.15809},
+  year    = {2025}
+}
+```
+
+## 🤝 Acknowledgments
+This work is heavily based on [Show-o](https://github.com/showlab/Show-o), [LLaDA](https://github.com/ML-GSAI/LLaDA), [maskgit](https://github.com/google-research/maskgit), [transformers](https://github.com/huggingface/transformers), [accelerate](https://github.com/huggingface/accelerate) and [webdataset](https://github.com/webdataset/webdataset). Thanks to all the authors for their great work.
+
+## 💬 Discussion and Collaboration
+
+Welcome to discuss and collaborate with us for continuously improving MMaDA.
+Reach us with this WeChat QR code!
+<p align="center">
+<img src="assets/WX-mmada.jpeg" width="256">
+</p>
