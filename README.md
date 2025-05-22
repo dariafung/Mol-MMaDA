@@ -56,6 +56,12 @@ We demonstrate the decoding process of MMaDA with a teaser video to show how a d
     <img src="assets/showcase0.8.gif" style="width: 90%" />
 </div> -->
 
+## 📰 Latest Updates
+
+
+* **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
+* **[2025-05-22]** We open source our MMaDA-8B-Base at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
+* **[2025-05-22]** We release our [research paper](https://arxiv.org/abs/2505.15809) and [demo](https://huggingface.co/spaces/Gen-Verse/MMaDA) for the first unified multimodal diffusion model: MMaDA. 
 
 
 ## 🧬 MMaDA Series Overview
@@ -69,12 +75,7 @@ MMaDA includes a series of checkpoints reflecting different training stages:
 <p><i>Overview of MMaDA's capablities.</i></p>
 </div>
 
-## 📰 Latest Updates
 
-
-* **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
-* **[2025-05-22]** We open source our MMaDA-8B-Base at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
-* **[2025-05-22]** We release our [research paper](https://arxiv.org/abs/2505.14683) for the first unified multimodal diffusion model: MMaDA. 
 
 
 ## ✅ TODO
