@@ -28,11 +28,13 @@
 ## 🌌 Introduction
 
 
-<p align="center">
-  <img src="assets/showcase0.8.gif" alt="Demo"  width="400"/>
-  <i>MMaDA's decoding demo. This video showcases how a diffusion model generates text and image. The "Text Generation" part adopts a "semi-autoregressive" sampling method and the "MultiModal Generation" part adopts a non-autoregressive sampling method which is purely diffusion denoising.</i>
-</p>
-
+<div align="center" style="width: 600px; margin: auto;">
+  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="600" />
+  <p style="font-style: italic; font-size: 14px; color: #555; margin-top: 6px;">
+    MMaDA's decoding demo. This video showcases how a diffusion model generates text and image.<br>
+    The "Text Generation" part uses a semi-autoregressive sampling method, while the "MultiModal Generation" part adopts non-autoregressive diffusion denoising.
+  </p>
+</div>
 
 
 
