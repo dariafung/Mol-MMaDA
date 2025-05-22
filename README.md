@@ -22,6 +22,13 @@
         alt="MMaDA on Hugging Face"
     />
   </a>
+  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada.jpeg">
+    <img 
+        src="https://img.shields.io/badge/Wechat-Join-green?logo=wechat&amp" 
+        alt="Wechat Group Link"
+    />
+  </a>
+  
 </p>
 
 
@@ -192,3 +199,8 @@ Reach us with this WeChat QR code!
 <p align="center">
 <img src="assets/WX-mmada.jpeg" width="256">
 </p>
+
+## ✨ Star History
+
+
+[![Star History Chart](https://api.star-history.com/svg?repos=Gen-Verse/MMaDA&type=Date)](https://star-history.com/#Gen-Verse/MMaDA&Date)
