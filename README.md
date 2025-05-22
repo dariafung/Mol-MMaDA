@@ -26,13 +26,16 @@
 
 
 ## 🌌 Introduction
-
+MMaDA is a new family of **multimodal diffusion foundation models** designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation. MMaDA is distinguished by three key innovations:
+1. MMaDA adopts a **unified diffusion architecture** with a shared probabilistic formulation and a modality-agnostic design, eliminating the need for modality-specific components.
+2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
+3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
 <div align="center" style="width: 600px; margin: auto;">
-  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="600" />
+  <img src="assets/showcase0.8.gif" alt="MMaDA decoding demo" width="500" />
   <p style="font-style: italic; font-size: 14px; color: #555; margin-top: 6px;">
-    MMaDA's decoding demo. This video showcases how a diffusion model generates text and image.<br>
-    The "Text Generation" part uses a semi-autoregressive sampling method, while the "MultiModal Generation" part adopts non-autoregressive diffusion denoising.
+    MMaDA's decoding demo. This video showcases how a diffusion foundation model generates text and image.<br>
+    The "Text Generation" part uses a semi-autoregressive sampling method, while the "Multimodal Generation" part adopts non-autoregressive diffusion denoising.
   </p>
 </div>
 
@@ -40,12 +43,9 @@
 
 
 
-MMaDA is a new family of **multimodal diffusion foundation models** designed to achieve superior performance across diverse domains such as textual reasoning, multimodal understanding, and text-to-image generation. MMaDA is distinguished by three key innovations:
-1. MMaDA adopts a **unified diffusion architecture** with a shared probabilistic formulation and a modality-agnostic design, eliminating the need for modality-specific components.
-2. MMaDA introduces a **mixed long chain-of-thought (CoT) fine-tuning** strategy that curates a unified CoT format across modalities.
-3. MMaDA adopts a unified policy-gradient-based RL algorithm, which we call **UniGRPO**, tailored for diffusion foundation models. Utilizing diversified reward modeling, **UniGRPO** unifies post-training across both reasoning and generation tasks, ensuring consistent performance improvements.
 
 
+<!--
 <div align="center">
 <img src="assets/example_compare.png" width="800">
 <p><i>Overview of MMaDA's capablities.</i></p>
