@@ -46,10 +46,7 @@ MMaDA is a new family of **multimodal diffusion foundation models** designed to 
 
 
 <!--
-<div align="center">
-<img src="assets/example_compare.png" width="800">
-<p><i>Overview of MMaDA's capablities.</i></p>
-</div>
+
 
 
 ## Decoding Demo
@@ -67,6 +64,10 @@ MMaDA includes a series of checkpoints reflecting different training stages:
 1. **MMaDA-8B-Base**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
 2. **MMaDA-8B-MixCoT (coming soon)**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual, multimodal and image generation reasoning. **Will be released in 2 weeks.**
 3. **MMaDA-8B-Max (coming soon)**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
+<div align="center">
+<img src="assets/example_compare.png" width="800">
+<p><i>Overview of MMaDA's capablities.</i></p>
+</div>
 
 ## 📰 Latest Updates
 
