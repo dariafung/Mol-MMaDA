@@ -4,7 +4,7 @@
 <h3>Multimodal Large Diffusion Language Models</h3></div>
 
 <p align="center">
-  <a href="https://arxiv.org/abs/2505.14683">
+  <a href="https://arxiv.org/abs/2505.15809">
     <img
       src="https://img.shields.io/badge/MMaDA-Paper-red?logo=arxiv&logoColor=red"
       alt="MMaDA Paper on arXiv"
@@ -12,7 +12,7 @@
   </a>
   <a href="https://huggingface.co/spaces/Gen-Verse/MMaDA">
     <img 
-        src="https://img.shields.io/badge/MMaDA%20Demo-Hugging%20Face%20Space-orange?logo=huggingface&logoColor=yellow" 
+        src="https://img.shields.io/badge/MMaDA%20Demo-Hugging%20Face%20Space-blue?logo=huggingface&logoColor=blue" 
         alt="MMaDA on Hugging Face"
     />
   </a>
@@ -176,7 +176,7 @@ accelerate launch --config_file path/to/your/accelerate_config --main_process_po
 @article{yang2025mmada,
   title   = {Multimodal Large Diffusion Language Models},
   author  = {Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
-  journal = {arXiv preprint arXiv:2505.},
+  journal = {arXiv preprint arXiv:2505.15809},
   year    = {2025}
 }
 ```
