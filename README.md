@@ -201,5 +201,3 @@ Also, you can reach us with this WeChat QR code!
 <img src="assets/WX-mmada.jpeg" width="256">
 </p>
 
-## ✨ Star History
-[![Star History Chart](https://api.star-history.com/svg?repos=Gen-Verse/MMaDA&type=Date)](https://www.star-history.com/#Gen-Verse/MMaDA&Date)
