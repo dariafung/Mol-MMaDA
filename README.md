@@ -182,10 +182,10 @@ accelerate launch --config_file path/to/your/accelerate_config --main_process_po
 ## 📖 Citation
 ```
 @article{yang2025mmada,
-  title   = {Multimodal Large Diffusion Language Models},
-  author  = {Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
-  journal = {arXiv preprint arXiv:2505.15809},
-  year    = {2025}
+  title={MMaDA: Multimodal Large Diffusion Language Models},
+  author={Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
+  journal={arXiv preprint arXiv:2505.15809},
+  year={2025}
 }
 ```
 
@@ -198,6 +198,6 @@ Welcome to discuss and collaborate with us for continuously improving MMaDA. If 
 
 Also, you can reach us with this WeChat QR code!
 <p align="center">
-<img src="assets/WX-mmada.jpeg" width="256">
+<img src="assets/WX-mmada-2.jpeg" width="256">
 </p>
 
