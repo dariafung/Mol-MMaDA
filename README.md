@@ -22,7 +22,7 @@
         alt="MMaDA on Hugging Face"
     />
   </a>
-  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada.jpeg">
+  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada-2.jpeg">
     <img 
         src="https://img.shields.io/badge/Wechat-Join-green?logo=wechat&amp" 
         alt="Wechat Group Link"
@@ -65,7 +65,7 @@ We demonstrate the decoding process of MMaDA with a teaser video to show how a d
 
 ## 📰 Latest Updates
 
-
+* **[2025-05-24]** We add support for MPS inference, tested on M4.
 * **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
 * **[2025-05-22]** We open source our MMaDA-8B-Base at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
 * **[2025-05-22]** We release our [research paper](https://arxiv.org/abs/2505.15809) and [demo](https://huggingface.co/spaces/Gen-Verse/MMaDA) for the first unified multimodal diffusion model: MMaDA. 
@@ -182,10 +182,10 @@ accelerate launch --config_file path/to/your/accelerate_config --main_process_po
 ## 📖 Citation
 ```
 @article{yang2025mmada,
-  title   = {Multimodal Large Diffusion Language Models},
-  author  = {Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
-  journal = {arXiv preprint arXiv:2505.15809},
-  year    = {2025}
+  title={MMaDA: Multimodal Large Diffusion Language Models},
+  author={Yang, Ling and Tian, Ye and Li, Bowen and Zhang, Xinchen and Shen, Ke and Tong, Yunhai and Wang, Mengdi},
+  journal={arXiv preprint arXiv:2505.15809},
+  year={2025}
 }
 ```
 
@@ -194,13 +194,10 @@ This work is heavily based on [Show-o](https://github.com/showlab/Show-o), [LLaD
 
 ## 💬 Discussion and Collaboration
 
-Welcome to discuss and collaborate with us for continuously improving MMaDA.
-Reach us with this WeChat QR code!
+Welcome to discuss and collaborate with us for continuously improving MMaDA. If you have any bad cases, please kindly share them in the [Issue](https://github.com/Gen-Verse/MMaDA/issues/4#issue-3083196081).
+
+Also, you can reach us with this WeChat QR code!
 <p align="center">
-<img src="assets/WX-mmada.jpeg" width="256">
+<img src="assets/WX-mmada-2.jpeg" width="256">
 </p>
 
-## ✨ Star History
-
-
-[![Star History Chart](https://api.star-history.com/svg?repos=Gen-Verse/MMaDA&type=Date)](https://star-history.com/#Gen-Verse/MMaDA&Date)

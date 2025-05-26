@@ -25,10 +25,16 @@ def add_gumbel_noise(logits, temperature):
     if abs(temperature) < 1e-9: # Effectively zero temperature
         return logits
     # Ensure logits are float64 for precision with noise, as suggested by user context
-    logits = logits.to(torch.float64)
+    if DEVICE == "mps":
+        logits = logits.to(torch.float32)
+    else:
+        logits = logits.to(torch.float64)
     # Standard Gumbel noise: -log(-log(U)), U ~ Uniform(0,1)
     # Add small epsilon for numerical stability inside logs
-    noise = torch.rand_like(logits, dtype=torch.float64)
+    if DEVICE == "mps":
+        noise = torch.rand_like(logits, dtype=torch.float32)
+    else:
+        noise = torch.rand_like(logits, dtype=torch.float64)
     standard_gumbel_noise = -torch.log(-torch.log(noise + 1e-20) + 1e-20)
     return logits + temperature * standard_gumbel_noise
 
@@ -46,7 +52,11 @@ def get_num_transfer_tokens(mask_index, steps):
 
 MODEL = None
 TOKENIZER = None
-DEVICE = 'cuda' if torch.cuda.is_available() else 'cpu'
+DEVICE = (
+    "cuda"
+    if torch.cuda.is_available()
+    else "mps" if torch.backends.mps.is_available() else "cpu"
+)
 MASK_ID = None 
 uni_prompting = None
 VQ_MODEL = MAGVITv2().from_pretrained("showlab/magvitv2").to(DEVICE)
@@ -297,10 +307,16 @@ def generate_viz_wrapper_lm(prompt_text, steps, gen_length, block_length, temper
             x0_predicted_tokens = torch.argmax(logits_with_noise, dim=-1) 
 
             if remasking_strategy == 'low_confidence':
-                probs = F.softmax(logits.to(torch.float64), dim=-1) 
+                if DEVICE == "mps":
+                    probs = F.softmax(logits.to(torch.float32), dim=-1)
+                else:
+                    probs = F.softmax(logits.to(torch.float64), dim=-1)
                 x0_probs = torch.gather(probs, dim=-1, index=x0_predicted_tokens.unsqueeze(-1)).squeeze(-1) 
             elif remasking_strategy == 'random':
-                x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float64) 
+                if DEVICE == "mps":
+                    x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float32)
+                else:
+                    x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float64)
             else: 
                 yield get_highlighted_text_tuples(x, input_ids, prompt_len, TOKENIZER, MASK_ID, raw_prompt_attention_mask), f"Error: Unknown remasking strategy '{remasking_strategy}'"
                 return
@@ -478,10 +494,16 @@ def generate_viz_wrapper(uploaded_image_pil, prompt_text, steps, gen_length, blo
             x0_predicted_tokens = torch.argmax(logits_with_noise, dim=-1) 
 
             if remasking_strategy == 'low_confidence':
-                probs = F.softmax(logits.to(torch.float64), dim=-1) 
+                if DEVICE == "mps":
+                    probs = F.softmax(logits.to(torch.float32), dim=-1)
+                else:
+                    probs = F.softmax(logits.to(torch.float64), dim=-1)
                 x0_probs = torch.gather(probs, dim=-1, index=x0_predicted_tokens.unsqueeze(-1)).squeeze(-1) 
             elif remasking_strategy == 'random':
-                x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float64) 
+                if DEVICE == "mps":
+                    x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float32)
+                else:
+                    x0_probs = torch.rand(x.shape, device=x.device, dtype=torch.float64)
             else: 
                 yield get_highlighted_text_tuples(x, input_ids, prompt_len, TOKENIZER, MASK_ID, raw_prompt_attention_mask), f"Error: Unknown remasking strategy '{remasking_strategy}'"
                 return
