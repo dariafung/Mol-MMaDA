@@ -41,7 +41,7 @@ from training.utils import get_config, flatten_omega_conf, image_transform
 from training.imagenet_dataset import ImageNetDataset
 from parquet import RefinedWebDataset
 
-from models import MAGVITv2, get_mask_chedule, MMadaModelLM, MMadaConfig
+from models import MAGVITv2, get_mask_schedule, MMadaModelLM, MMadaConfig
 from training.prompting_utils import UniversalPrompting
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
@@ -49,7 +49,6 @@ from models.logging import set_verbosity_info, set_verbosity_error
 from torch.utils.data import DataLoader
 from torch.utils.data.distributed import DistributedSampler
 
-from llava.llava_data_vq_unified import get_instruct_data_loader
 
 SYSTEM_PROMPT_LEN = 28
 
@@ -234,9 +233,9 @@ def main():
     if config.get("mask_schedule", None) is not None:
         schedule = config.mask_schedule.schedule
         args = config.mask_schedule.get("params", {})
-        mask_schedule = get_mask_chedule(schedule, **args)
+        mask_schedule = get_mask_schedule(schedule, **args)
     else:
-        mask_schedule = get_mask_chedule(config.training.get("mask_schedule", "cosine"))
+        mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine"))
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
@@ -370,28 +369,6 @@ def main():
             shuffle=True,
             shuffle_buffer_size=dataset_config.shuffle_buffer_size,
             is_captioning=True
-        )
-
-    elif config.dataset.und_type == "llava_pretrain":
-        train_dataloader_mmu = get_instruct_data_loader(
-            tokenizer,
-            batch_size=config.training.batch_size_mmu,
-            num_workers=dataset_config.num_workers,
-            world_size=accelerator.num_processes,
-            local_rank=accelerator.process_index,
-            max_length=preproc_config.max_seq_length if config.dataset.add_system_prompt else preproc_config.max_seq_length + SYSTEM_PROMPT_LEN,
-            phase="pretrain"
-        )
-
-    elif config.dataset.und_type == "llava_tuning":
-        train_dataloader_mmu = get_instruct_data_loader(
-            tokenizer,
-            batch_size=config.training.batch_size_mmu,
-            num_workers=dataset_config.num_workers,
-            world_size=accelerator.num_processes,
-            local_rank=accelerator.process_index,
-            max_length=preproc_config.max_seq_length if config.dataset.add_system_prompt else preproc_config.max_seq_length + SYSTEM_PROMPT_LEN,
-            phase="tuning"
         )
 
     else:

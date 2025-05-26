@@ -41,7 +41,7 @@ from training.utils import get_config, flatten_omega_conf, image_transform
 from training.imagenet_dataset import ImageNetDataset
 from parquet import RefinedWebDataset
 
-from models import MAGVITv2, get_mask_chedule, MMadaModelLM, MMadaConfig
+from models import MAGVITv2, get_mask_schedule, MMadaModelLM, MMadaConfig
 from training.prompting_utils import UniversalPrompting
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
@@ -225,9 +225,9 @@ def main():
     if config.get("mask_schedule", None) is not None:
         schedule = config.mask_schedule.schedule
         args = config.mask_schedule.get("params", {})
-        mask_schedule = get_mask_chedule(schedule, **args)
+        mask_schedule = get_mask_schedule(schedule, **args)
     else:
-        mask_schedule = get_mask_chedule(config.training.get("mask_schedule", "cosine"))
+        mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine"))
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
