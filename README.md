@@ -64,18 +64,18 @@ We demonstrate the decoding process of MMaDA with a teaser video to show how a d
 </div> -->
 
 ## 📰 Latest Updates
-
+* **[2025-06-02]** We open source our **MMaDA-8B-MixCoT** at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT). 
 * **[2025-05-24]** We add support for MPS inference, tested on M4.
 * **[2025-05-22]** We release the inference and training code of MMaDA for text generation, multimodal generation and image generation. 
-* **[2025-05-22]** We open source our MMaDA-8B-Base at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). MMaDA-8B-MixCoT and  MMaDA-8B-Max will be released in the near future.
+* **[2025-05-22]** We open source our **MMaDA-8B-Base** at [Huggingface](https://huggingface.co/Gen-Verse/MMaDA-8B-Base). **MMaDA-8B-MixCoT** and  **MMaDA-8B-Max** will be released in the near future.
 * **[2025-05-22]** We release our [research paper](https://arxiv.org/abs/2505.15809) and [demo](https://huggingface.co/spaces/Gen-Verse/MMaDA) for the first unified multimodal diffusion model: MMaDA. 
 
 
 ## 🧬 MMaDA Series Overview
 
 MMaDA includes a series of checkpoints reflecting different training stages:
-1. **MMaDA-8B-Base**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
-2. **MMaDA-8B-MixCoT (coming soon)**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of complex textual, multimodal and image generation reasoning. **Will be released in 2 weeks.**
+1. **[MMaDA-8B-Base](https://huggingface.co/Gen-Verse/MMaDA-8B-Base)**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
+2. **[MMaDA-8B-MixCoT](https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT)**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of **complex** textual, multimodal and image generation reasoning. 
 3. **MMaDA-8B-Max (coming soon)**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
 <div align="center">
 <img src="assets/example_compare.png" width="800">
@@ -86,7 +86,8 @@ MMaDA includes a series of checkpoints reflecting different training stages:
 
 
 ## ✅ TODO
-- [ ] Release  MMaDA-8B-MixCoT and MMaDA-8B-Max
+- [x] Release [MMaDA-8B-MixCoT](https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT)
+- [ ] Release MMaDA-8B-Max
 - [ ] Release OpenRLHF-based UniGRPO training code.
 
 ## ⚙️ Quick Start
