@@ -1050,7 +1050,7 @@ def understanding_images(
         default_prompt = '<|start_header_id|>user<|end_header_id|>\n' + "Please describe this image in detail." + '<eot_id><|start_header_id|>assistant<|end_header_id|>\n'
     
     file_list = os.listdir(config.dataset.params.mmu_image_root)
-    file_list = [f for f in file_list if f.lower().endswith(('.jpg', '.png'))]
+    file_list = [f for f in file_list if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     file_list = sorted(file_list)
     responses = ['' for i in range(len(file_list))]
     questions = ['' for i in range(len(file_list))]

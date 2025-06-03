@@ -889,6 +889,7 @@ def understanding_images(
     model.eval()
         
     file_list = os.listdir(config.dataset.params.mmu_image_root)
+    file_list = [f for f in file_list if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
     responses = ['' for i in range(len(file_list))]
     images = []
     
