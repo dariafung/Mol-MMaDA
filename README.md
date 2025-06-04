@@ -22,6 +22,12 @@
         alt="MMaDA on Hugging Face"
     />
   </a>
+    <a href="https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT">
+    <img 
+        src="https://img.shields.io/badge/MMaDA--8B--MixCoT-Hugging%20Face%20Model-orange?logo=huggingface&logoColor=yellow" 
+        alt="MMaDA on Hugging Face"
+    />
+  </a>
   <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada-2.jpeg">
     <img 
         src="https://img.shields.io/badge/Wechat-Join-green?logo=wechat&amp" 
