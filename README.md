@@ -28,7 +28,7 @@
         alt="MMaDA on Hugging Face"
     />
   </a>
-  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada-2.jpeg">
+  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada-3.jpeg">
     <img 
         src="https://img.shields.io/badge/Wechat-Join-green?logo=wechat&amp" 
         alt="Wechat Group Link"
