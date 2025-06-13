@@ -28,7 +28,7 @@
         alt="MMaDA on Hugging Face"
     />
   </a>
-  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/WX-mmada-3.jpeg">
+  <a href="https://github.com/Gen-Verse/MMaDA/blob/main/assets/wx-mmada-0613.jpeg">
     <img 
         src="https://img.shields.io/badge/Wechat-Join-green?logo=wechat&amp" 
         alt="Wechat Group Link"
@@ -82,7 +82,7 @@ We demonstrate the decoding process of MMaDA with a teaser video to show how a d
 MMaDA includes a series of checkpoints reflecting different training stages:
 1. **[MMaDA-8B-Base](https://huggingface.co/Gen-Verse/MMaDA-8B-Base)**: After pretraining and instruction tuning. Capable of basic text generation, image generation, image captioning and **thinking ablities**.
 2. **[MMaDA-8B-MixCoT](https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT)**: After mixed long chain-of-thought (CoT) fine-tuning. Capable of **complex** textual, multimodal and image generation reasoning. 
-3. **MMaDA-8B-Max (coming soon)**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. **Will be released in 1 month.**
+3. **MMaDA-8B-Max (coming soon)**: After UniGRPO reinforment learning. Excels at complex reasoning and awesome visual generation. Will be released in the future.
 <div align="center">
 <img src="assets/example_compare.png" width="800">
 <p><i>Overview of MMaDA's capablities.</i></p>
@@ -93,8 +93,7 @@ MMaDA includes a series of checkpoints reflecting different training stages:
 
 ## ✅ TODO
 - [x] Release [MMaDA-8B-MixCoT](https://huggingface.co/Gen-Verse/MMaDA-8B-MixCoT)
-- [ ] Release MMaDA-8B-Max
-- [ ] Release OpenRLHF-based UniGRPO training code.
+- [ ] Release MMaDA-8B-Max and OpenRLHF-based UniGRPO training code.
 
 ## ⚙️ Quick Start
 First, set up the enviroment:
@@ -205,6 +204,6 @@ Welcome to discuss and collaborate with us for continuously improving MMaDA. If 
 
 Also, you can reach us with this WeChat QR code!
 <p align="center">
-<img src="assets/WX-mmada-2.jpeg" width="256">
+<img src="assets/wx-mmada-0613.jpeg" width="256">
 </p>
 
