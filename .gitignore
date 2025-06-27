@@ -1,0 +1,19 @@
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Virtual environments
+env/
+.venv/
+mmada_env/
+
+# Logs & training artifacts
+wandb/
+*.log
+*.ckpt
+checkpoints/
+models/
+
+# Large data files
+*.parquet
+data/
