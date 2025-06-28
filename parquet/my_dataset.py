@@ -270,6 +270,7 @@ class MolecularUnifiedDataset(IterableDataset):
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         批处理函数，对文本和 SELFIES 序列进行填充，对 3D 数据进行堆叠。
+        排除 'id' 字段以避免 accelerate 的拼接错误。
         """
         batched_data = collections.defaultdict(list)
         for item in batch:
@@ -280,17 +281,16 @@ class MolecularUnifiedDataset(IterableDataset):
         final_batch = {}
 
         # --- 对文本和 SELFIES 序列进行填充 ---
-        # input_ids 和 attention_mask 需要一起填充
         if "selfies_input_ids" in batched_data and len(batched_data["selfies_input_ids"]) > 0:
             padded_selfies = self.tokenizer.pad(
                 {"input_ids": batched_data["selfies_input_ids"], 
                  "attention_mask": batched_data["selfies_attention_mask"]},
-                padding=True, # 填充到批次中最长序列的长度
+                padding=True, 
                 return_tensors="pt",
             )
             final_batch["selfies_input_ids"] = padded_selfies["input_ids"]
             final_batch["selfies_attention_mask"] = padded_selfies["attention_mask"]
-        else: # 如果没有数据，返回空张量以避免后续错误
+        else:
             final_batch["selfies_input_ids"] = torch.empty(0, dtype=torch.long)
             final_batch["selfies_attention_mask"] = torch.empty(0, dtype=torch.long)
 
@@ -304,13 +304,12 @@ class MolecularUnifiedDataset(IterableDataset):
             )
             final_batch["text_input_ids"] = padded_text["input_ids"]
             final_batch["text_attention_mask"] = padded_text["attention_mask"]
-        else: # 如果没有数据，返回空张量
+        else:
             final_batch["text_input_ids"] = torch.empty(0, dtype=torch.long)
             final_batch["text_attention_mask"] = torch.empty(0, dtype=torch.long)
 
 
         # --- 对 3D 相关的固定尺寸张量进行堆叠 ---
-        # 这些张量应该已经在 __iter__ 中被 padding 到 max_atoms 或 max_atoms x max_atoms
         keys_to_stack = ["atom_vec", "coordinates", "atoms_mask"]
         if self.include_edge_bond_dist:
             keys_to_stack.extend(["edge_type", "bond_type", "dist"])
@@ -333,10 +332,10 @@ class MolecularUnifiedDataset(IterableDataset):
                 else: # atom_vec 或其他 1D 数组
                     final_batch[k] = torch.empty(0, self.max_atoms, dtype=torch.long)
 
-
-        # --- 其他字段（如 id）保持为列表 ---
-        if "id" in batched_data:
-            final_batch["id"] = batched_data["id"] # 保持为列表
+        # --- 不再将 'id' 字段添加到 final_batch 中 ---
+        # 如果训练过程中需要访问 id，则需要修改 prepare_molecular_inputs_and_labels 函数，
+        # 让它从 batch 中直接获取，而不是从 collate_fn 的 final_batch 中。
+        # 但通常 id 字段只用于记录，不用于模型输入，所以暂时移除是安全的。
 
         return final_batch
 

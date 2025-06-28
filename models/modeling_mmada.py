@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 import math
 import sys
-from abc import abstractmethod
+# from abc import abstractmethod
 from collections import defaultdict
 from functools import partial
 from typing import (
@@ -30,7 +30,7 @@ from transformers import PreTrainedModel
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.auto import AutoModel, AutoConfig, AutoModelForCausalLM
 from transformers.cache_utils import Cache
-from PIL import Image
+# from PIL import Image
 from .configuration_llada import (
     LLaDAConfig,
     StrEnum,
@@ -43,43 +43,58 @@ from .configuration_llada import (
 )
 
 from .modeling_llada import LLaDAModelLM
-from .sampling import cosine_schedule, mask_by_random_topk
+from .sampling import cosine_schedule
 from transformers import PretrainedConfig
 
-def add_gumbel_noise(logits, temperature):
-    '''
-    The Gumbel max is a method for sampling categorical distributions.
-    According to arXiv:2409.02908, for MDM, low-precision Gumbel Max improves perplexity score but reduces generation quality.
-    Thus, we use float64.
-    '''
-    if temperature == 0:
-        return logits
-    logits = logits.to(torch.float64)
-    noise = torch.rand_like(logits, dtype=torch.float64)
-    gumbel_noise = (- torch.log(noise)) ** temperature
-    return logits.exp() / gumbel_noise
 
+# --- 新增 3D 分子编码器 ---
+class Molecular3DEncoder(nn.Module):
+    def __init__(self, config: "MMadaConfig"): # 这里的 config 是 MMadaConfig
+        super().__init__()
+        # 使用 nn.Embedding 编码原子类型
+        # config.num_atom_types 应该是原子序数最大值 + 1 + 1 (0 for unknown, max_Z+1 for padding)
+        self.atom_embedding = nn.Embedding(
+            config.num_atom_types, config.mol_atom_embedding_dim, padding_idx=0 # 假设0是pad token
+        )
+        # 将 3D 坐标投影到高维空间
+        self.coord_projection = nn.Linear(3, config.mol_coord_embedding_dim)
 
-def get_num_transfer_tokens(mask_index, steps):
-    '''
-    In the reverse process, the interval [0, 1] is uniformly discretized into steps intervals.
-    Furthermore, because LLaDA employs a linear noise schedule (as defined in Eq. (8)),
-    the expected number of tokens transitioned at each step should be consistent.
+        # 一个简单的 MLP 来融合原子和坐标特征，并输出分子级嵌入
+        self.per_atom_mlp = nn.Sequential(
+            nn.Linear(config.mol_atom_embedding_dim + config.mol_coord_embedding_dim, config.fusion_hidden_dim),
+            nn.GELU(), # 使用 GELU 激活函数
+            nn.Linear(config.fusion_hidden_dim, config.mol_3d_encoder_output_dim)
+        )
+        # 如果你计划使用更复杂的结构如 GNNs 或 Transformer，需要在这里替换或添加
+        # 例如：self.gnn = GNNLayer(...)
 
-    This function is designed to precompute the number of tokens that need to be transitioned at each step.
-    '''
-    mask_num = mask_index.sum(dim=1, keepdim=True)
+    def forward(self, atom_vec: torch.LongTensor, coordinates: torch.FloatTensor, atoms_mask: torch.BoolTensor):
+        """
+        Args:
+            atom_vec: 原子类型 ID, (batch_size, max_atoms)
+            coordinates: 原子 3D 坐标, (batch_size, max_atoms, 3)
+            atoms_mask: 真实原子掩码 (True 为真实原子), (batch_size, max_atoms)
+        Returns:
+            分子嵌入: (batch_size, mol_3d_encoder_output_dim)
+        """
+        # 1. 编码原子类型和坐标
+        atom_embeds = self.atom_embedding(atom_vec) # (B, N_max, mol_atom_embedding_dim)
+        coord_embeds = self.coord_projection(coordinates) # (B, N_max, mol_coord_embedding_dim)
+        
+        # 2. 拼接原子和坐标嵌入
+        fused_atom_coord_embeds = torch.cat([atom_embeds, coord_embeds], dim=-1) # (B, N_max, combined_dim)
+        
+        # 3. 通过每个原子的 MLP
+        per_atom_features = self.per_atom_mlp(fused_atom_coord_embeds) # (B, N_max, mol_3d_encoder_output_dim)
 
-    base = mask_num // steps
-    remainder = mask_num % steps
+        # 4. 池化：对真实原子进行平均池化得到分子级嵌入
+        # 确保掩码维度匹配 (B, N_max, 1)
+        # 使用 float() 将 bool 转换为 float (1.0/0.0)
+        masked_features = per_atom_features * atoms_mask.unsqueeze(-1).float()
+        molecular_embedding = masked_features.sum(dim=1) / (atoms_mask.sum(dim=1, keepdim=True).float() + 1e-5) # 避免除以零
 
-    num_transfer_tokens = torch.zeros(mask_num.size(0), steps, device=mask_index.device, dtype=torch.int64) + base
-
-    for i in range(mask_num.size(0)):
-        num_transfer_tokens[i, :remainder[i]] += 1
-
-    return num_transfer_tokens
-
+        return molecular_embedding
+    
 class MMadaConfig(PretrainedConfig):
     model_type = "mmada"
 
@@ -90,566 +105,232 @@ class MMadaConfig(PretrainedConfig):
             "vocab_size",
             "llm_vocab_size",
             "llm_model_path",
-            "codebook_size",
-            "num_vq_tokens",
+            # "codebook_size",
+            # "num_vq_tokens",
             "num_new_special_tokens",
             "gradient_checkpointing",
             "new_vocab_size",
+             # --- 新增配置项，以便在 config.yaml 中定义 3D 编码器和融合层的参数 ---
+            "mol_atom_embedding_dim", # 分子原子嵌入维度
+            "mol_coord_embedding_dim", # 分子坐标嵌入维度
+            "mol_3d_encoder_output_dim", # 3D 编码器输出维度
+            "fusion_hidden_dim", # 融合层隐藏维度
+            "final_condition_dim", # 最终融合后传递给 LLM 的条件维度
+            "num_atom_types", # 原子类型词汇表大小 (例如，Z=0到max_Z+1)
+            "max_atoms", # 最大原子数 (与 dataset 保持一致)
+            "output_atom_coords_dim", # 输出原子坐标的维度 (通常是3)
+            "output_atom_type_dim", # 输出原子类型的维度 (通常是原子词汇表大小)
+            "diffusion_timesteps", # 扩散过程的总时间步 (例如 1000)
+            "noise_schedule_beta_start", # 扩散噪声调度参数
+            "noise_schedule_beta_end",
         ]
 
         for key in allowed_keys:
             if key in kwargs:
                 setattr(self, key, kwargs[key])
 
-
+        # 从父类 LLaDAConfig 复制一些关键参数，或者确保 MMadaConfig 包含它们
+        # 这些参数会被 super().__init__ 使用
+        self.d_model = kwargs.get("d_model", 4096) # LLM 模型的隐藏层维度
+        self.n_heads = kwargs.get("n_heads", 32)
+        self.n_layers = kwargs.get("n_layers", 32)
+        self.vocab_size = kwargs.get("vocab_size", 126464) # 确保这里的 vocab_size 是扩展后的总词汇表大小
+        self.mask_token_id = kwargs.get("mask_token_id", 126336)
+        self.pad_token_id = kwargs.get("pad_token_id", 126081)
 
 class MMadaModelLM(LLaDAModelLM):
     config_class = MMadaConfig
     base_model_prefix = "model"
+
     def __init__(self, config: MMadaConfig, *args, **kwargs):
         print(f"Initializing MMadaModelLM with config: {config}")
         super().__init__(config, *args, **kwargs)
 
-        # # resize token embeddings
-        # print(f"Resizing token embeddings to {config.new_vocab_size}")
-        # self.resize_token_embeddings(config.new_vocab_size)
+        self.molecular_3d_encoder = Molecular3DEncoder(config)
 
-    @torch.no_grad()
-    def t2i_generate(
-            self,
-            input_ids: torch.LongTensor = None,
-            uncond_input_ids: torch.LongTensor = None,
-            attention_mask=None,
-            uncond_attention_mask=None,
-            temperature=1.0,
-            timesteps=18,  # ideal number of steps is 18 in maskgit paper
-            guidance_scale=0,
-            noise_schedule=cosine_schedule,
-            generator: torch.Generator = None,
-            config=None,
-            seq_len=1024,
-            mask_token_id = 126336,
-            resolution = 512,
-            codebook_size = 8192,
-            **kwargs,
-    ):
+        # --- 多模态融合层 ---
+        # 融合层的输入维度：LLM_d_model (text/selfies) + mol_3d_encoder_output_dim
+        fusion_input_dim = config.d_model * 2 + config.mol_3d_encoder_output_dim # selfies_embeds + text_embeds + mol_3d_embeds
+        
+        self.multimodal_fusion_mlp = nn.Sequential(
+            nn.Linear(fusion_input_dim, config.fusion_hidden_dim),
+            nn.GELU(),
+            nn.Linear(config.fusion_hidden_dim, config.final_condition_dim) # 输出到 LLM 的条件维度
+        )
+        
+        # --- 新增输出头：用于预测 3D 坐标和原子类型 ---
+        # 这些头将作用于融合后的条件嵌入 (final_condition_embeds)，并输出扁平化的预测
+        
+        # 预测原子类型（分类任务）
+        self.atom_type_prediction_head = nn.Linear(config.final_condition_dim, config.num_atom_types)
+        
+        # 预测原子坐标（回归任务）
+        self.coordinates_prediction_head = nn.Linear(config.final_condition_dim, config.output_atom_coords_dim)
+        
+        # 为扩散过程定义噪声调度 (beta 值)
+        self.betas = torch.linspace(config.noise_schedule_beta_start, config.noise_schedule_beta_end, config.diffusion_timesteps)
+        self.alphas = 1.0 - self.betas
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0) # 累积乘积
+        self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
+        self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
+
+    def forward(
+        self,
+        selfies_input_ids: torch.LongTensor,
+        selfies_attention_mask: torch.LongTensor,
+        text_input_ids: torch.LongTensor,
+        text_attention_mask: torch.LongTensor,
+        atom_vec: torch.LongTensor, # 真实的原子类型
+        coordinates: torch.FloatTensor, # 真实的 3D 坐标
+        atoms_mask: torch.BoolTensor,
+        edge_type: Optional[torch.LongTensor] = None,
+        bond_type: Optional[torch.LongTensor] = None,
+        dist: Optional[torch.FloatTensor] = None,
+        rdmol2selfies: Optional[torch.FloatTensor] = None,
+        timesteps: Optional[torch.LongTensor] = None, # 扩散时间步 (训练时添加噪声用)
+        # LLM forward 的原始参数，不直接在这里传递给 super().forward()
+        # **kwargs 用于捕获其他可能的参数，确保兼容性
+        **kwargs,
+    ) -> Tuple[torch.Tensor, torch.Tensor]: # 返回预测坐标和原子类型 logits
         """
-        Generate 1:1 similar to the original MaskGit repo
-        https://github.com/google-research/maskgit/blob/main/maskgit/libml/parallel_decode.py#L79
+        MMadaModelLM 的主要前向传播方法。
+        接收多模态输入，融合后通过 LLM 主干，并预测 3D 结构。
+        注意：在这个简化版本中，LLM 主干 (self.model) 主要用于获取 token 嵌入，
+        然后预测头直接作用于多模模态融合后的特征。
         """
+        batch_size = selfies_input_ids.shape[0] # 获取批次大小
 
-        # begin with all image token ids masked
-        # 计算有多少个mask token
-        mask_count = (input_ids == mask_token_id).sum().item()
-        num_vq_tokens = seq_len
-        num_new_special_tokens = 0
-        uni_prompting = kwargs.get("uni_prompting", None)
-        # print(f"config.model.mmada.llm_vocab_size: {config.model.mmada.llm_vocab_size}, {len(uni_prompting.text_tokenizer)}")
-        input_ids_minus_lm_vocab_size = input_ids[:, -(num_vq_tokens + 1):-1].clone()
-        input_ids_minus_lm_vocab_size = torch.where(input_ids_minus_lm_vocab_size == mask_token_id, mask_token_id, input_ids_minus_lm_vocab_size - len(uni_prompting.text_tokenizer) - num_new_special_tokens)
+        # 1. 编码 SELFIES 和文本
+        selfies_embeds = self.model.embed_tokens(selfies_input_ids) # (B, L_selfies, D_model)
+        text_embeds = self.model.embed_tokens(text_input_ids) # (B, L_text, D_model)
+        
+        # 平均池化（或更复杂的聚合）
+        selfies_sum = (selfies_embeds * selfies_attention_mask.unsqueeze(-1).float()).sum(dim=1)
+        selfies_count = selfies_attention_mask.sum(dim=1, keepdim=True).float() + 1e-5
+        selfies_context_embeds = selfies_sum / selfies_count # (B, D_model)
 
-        # for classifier-free guidance
-        if uncond_input_ids is not None:
-            uncond_prefix = uncond_input_ids[:, :resolution + 1]
+        text_sum = (text_embeds * text_attention_mask.unsqueeze(-1).float()).sum(dim=1)
+        text_count = text_attention_mask.sum(dim=1, keepdim=True).float() + 1e-5
+        text_context_embeds = text_sum / text_count # (B, D_model)
+        
+        # 2. 编码 3D 数据
+        # self.molecular_3d_encoder 期望 atom_vec, coordinates, atoms_mask
+        mol_3d_embeds = self.molecular_3d_encoder(atom_vec, coordinates, atoms_mask)
 
-        for step in range(timesteps):
-            if uncond_input_ids is not None and guidance_scale > 0:
-                uncond_input_ids = torch.cat(
-                    [uncond_prefix, input_ids[:, resolution + 1:]], dim=1)
-                model_input = torch.cat([input_ids, uncond_input_ids])
-                all_attention_mask = torch.cat([attention_mask, uncond_attention_mask], dim=0)
-                attention_bias = (all_attention_mask[:, :, None] & all_attention_mask[:, None, :]).bool().unsqueeze(1)
-                logits = self(model_input, attention_bias=attention_bias).logits 
-                # print(f"logits.shape: {logits.shape}")
-                cond_logits, uncond_logits = torch.chunk(logits, 2, dim=0)
-                # logits = uncond_logits + guidance_scale * (cond_logits - uncond_logits)
-                # it seems that muse has a different cfg setting
-                logits = (1 + guidance_scale) * cond_logits - guidance_scale * uncond_logits
-                logits = logits[:, -(num_vq_tokens + 1):-1, len(uni_prompting.text_tokenizer) + num_new_special_tokens: len(uni_prompting.text_tokenizer) + num_new_special_tokens + codebook_size]
-            else:
-                attention_bias = (attention_mask[:, :, None] & attention_mask[:, None, :]).bool().unsqueeze(1)
-                logits = self(input_ids, attention_bias=attention_bias).logits
-                logits = logits[:, -(num_vq_tokens + 1):-1, len(uni_prompting.text_tokenizer) + num_new_special_tokens: len(uni_prompting.text_tokenizer) + num_new_special_tokens + codebook_size]
+        # 3. 融合所有模态的嵌入
+        fused_multimodal_embeds = torch.cat(
+            [selfies_context_embeds, text_context_embeds, mol_3d_embeds], dim=-1
+        )
+        
+        # 通过融合 MLP 得到最终的条件嵌入
+        final_condition_embeds = self.multimodal_fusion_mlp(fused_multimodal_embeds)
+        
+        # 4. 应用预测头
+        # 预测原子类型 (分类任务)
+        # (B, max_atoms * num_atom_types) -> reshape to (B, max_atoms, num_atom_types)
+        predicted_atom_type_logits_flat = self.atom_type_prediction_head(final_condition_embeds)
+        predicted_atom_type_logits = predicted_atom_type_logits_flat.view(batch_size, self.config.max_atoms, self.config.num_atom_types)
+        
+        # 预测原子坐标 (回归任务)
+        # (B, max_atoms * output_atom_coords_dim) -> reshape to (B, max_atoms, output_atom_coords_dim)
+        predicted_coordinates_flat = self.coordinates_prediction_head(final_condition_embeds)
+        predicted_coordinates = predicted_coordinates_flat.view(batch_size, self.config.max_atoms, self.config.output_atom_coords_dim)
 
-            # logits: 1, 1024, 8192
-            # print(f"logits.shape: {logits.shape}")
-            probs = logits.softmax(dim=-1)
-            sampled = probs.reshape(-1, logits.size(-1))
-            # print(f"probs: {probs}, probs.shape: {probs.shape}, sampled: {sampled}, sampled.shape: {sampled.shape}")
-            sampled_ids = torch.multinomial(sampled, 1, generator=generator)[:, 0].view(*logits.shape[:-1]) # 1, 1024
+        return predicted_coordinates, predicted_atom_type_logits
 
-            unknown_map = input_ids_minus_lm_vocab_size == mask_token_id
-            # print(f"unknown_map.sum(dim=-1, keepdim=True): {unknown_map.sum(dim=-1, keepdim=True)}")
-            sampled_ids = torch.where(unknown_map, sampled_ids, input_ids_minus_lm_vocab_size)
-            # Defines the mask ratio for the next round. The number to mask out is
-            # determined by mask_ratio * unknown_number_in_the_beginning.
-            ratio = 1.0 * (step + 1) / timesteps
-            mask_ratio = noise_schedule(torch.tensor(ratio))
-            # Computes the probabilities of each selected tokens.
-            selected_probs = torch.gather(probs, -1, sampled_ids.long()[..., None])
-            selected_probs = selected_probs.squeeze(-1)
+    def get_alpha_bar(self, timesteps: torch.LongTensor) -> torch.FloatTensor:
+        """从预计算的 alpha_bars 中获取指定时间步的值。"""
+        # 确保 alpha_bars 在正确的设备上
+        return self.alpha_bars[timesteps].to(timesteps.device)
 
-            # Ignores the tokens given in the input by overwriting their confidence.
-            selected_probs = torch.where(unknown_map, selected_probs, torch.finfo(selected_probs.dtype).max)
-            # Gets mask lens for each sample in the batch according to the mask ratio.
-            mask_len = (num_vq_tokens * mask_ratio).floor().unsqueeze(0).to(logits.device)
-            # Keeps at least one of prediction in this round and also masks out at least
-            # one and for the next iteration
-            mask_len = torch.max(
-                torch.tensor([1], device=logits.device), torch.min(unknown_map.sum(dim=-1, keepdim=True) - 1, mask_len)
-            )
-            # print(f"mask_len: {mask_len}, mask_len.shape: {mask_len.shape}")
-            # Adds noise for randomness
-            temperature = temperature * (1.0 - ratio)
-            masking = mask_by_random_topk(mask_len, selected_probs, temperature, generator=generator)
-            # Masks tokens with lower confidence.
-            input_ids[:, -(num_vq_tokens + 1):-1] = torch.where(masking, mask_token_id,
-                                                          sampled_ids + len(uni_prompting.text_tokenizer)
-                                                          + num_new_special_tokens)
-            input_ids_minus_lm_vocab_size = torch.where(masking, mask_token_id, sampled_ids)
-
-        return sampled_ids
-    
+    # --- 彻底重写 forward_process 函数 ---
     def forward_process(
-            self,
-            input_ids, 
-            labels,
-            batch_size_t2i=0,
-            batch_size_lm=0,
-            batch_size_mmu=0,
-            max_seq_length=128,
-            p_mask_lm=None,
-            p_mask_mmu=None,
-            answer_lengths=None,
-            t2i_masks=None,
-            answer_lengths_lm=None
-            ):
-        # attention bias, True for batch_size, 1, seq_len, seq_len  
-        attention_bias = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], input_ids.shape[1])
-        attention_bias_t2i = (t2i_masks[:, :, None] & t2i_masks[:, None, :]).bool().unsqueeze(1)
-        attention_bias[:batch_size_t2i] = attention_bias_t2i
-        logits = self(input_ids, attention_bias=attention_bias).logits 
-        self.output_size = logits.shape[-1]
-
-        if batch_size_t2i == 0:
-            loss_t2i = torch.tensor(0.0, device=input_ids.device)
-        else:
-            loss_t2i = F.cross_entropy(
-                logits[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1, self.output_size),
-                labels[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1), ignore_index=-100,
-                )
-        
-        masked_indices = input_ids == self.config.mask_token_id 
-        masked_indices_lm = masked_indices[batch_size_t2i:batch_size_t2i + batch_size_lm]
-        masked_indices_mmu = masked_indices[-batch_size_mmu:]
-        p_mask_lm = p_mask_lm.to(masked_indices_lm.device)
-        p_mask_mmu = p_mask_mmu.to(masked_indices_mmu.device)       
-        answer_lengths = answer_lengths.to(masked_indices_mmu.device) 
-        loss_lm = F.cross_entropy(
-            logits[batch_size_t2i:batch_size_t2i + batch_size_lm][masked_indices_lm].contiguous().view(-1, self.output_size),
-            labels[batch_size_t2i:batch_size_t2i + batch_size_lm][masked_indices_lm].contiguous().view(-1), ignore_index=-100, reduction='none'
-            )/p_mask_lm[masked_indices_lm]
-
-        if answer_lengths_lm is not None:
-            loss_lm = torch.sum(loss_lm / answer_lengths_lm[masked_indices_lm]) / (logits[batch_size_t2i:batch_size_t2i + batch_size_lm].shape[0])  
-        else:
-            loss_lm = loss_lm.sum() / (logits[batch_size_t2i:batch_size_t2i + batch_size_lm].shape[0] * logits[batch_size_t2i:batch_size_t2i + batch_size_lm].shape[1])     
-
-        loss_mmu = F.cross_entropy(
-            logits[-batch_size_mmu:][masked_indices_mmu].contiguous().view(-1, self.output_size),
-            labels[-batch_size_mmu:][masked_indices_mmu].contiguous().view(-1), ignore_index=-100, reduction='none'
-            )/p_mask_mmu[masked_indices_mmu]
-        loss_mmu = torch.sum(loss_mmu/answer_lengths[masked_indices_mmu]) / (logits[-batch_size_mmu:].shape[0])
-        
-        return logits, loss_t2i, loss_lm, loss_mmu
-
-    def forward_process_with_r2i(
-            self,
-            input_ids, 
-            labels,
-            t2i_masks=None,
-            max_seq_length=128,
-            batch_size_t2i=0,
-            batch_size_lm=0,
-            batch_size_mmu=0,
-            batch_size_r2i=0,
-            p_mask_lm=None,
-            p_mask_mmu=None,
-            p_mask_r2i=None,
-            answer_lengths=None,
-            answer_lengths_lm=None,
-            answer_lengths_r2i=None,
-            ):
-        # attention bias, True for batch_size, 1, seq_len, seq_len  
-        attention_bias = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], input_ids.shape[1])
-        attention_bias_t2i = (t2i_masks[:, :, None] & t2i_masks[:, None, :]).bool().unsqueeze(1)
-        attention_bias[:batch_size_t2i] = attention_bias_t2i
-        logits = self(input_ids, attention_bias=attention_bias).logits 
-        # logits = self(input_ids).logits
-        self.output_size = logits.shape[-1]
-
-        if batch_size_t2i == 0:
-            loss_t2i = torch.tensor(0.0, device=input_ids.device)
-        else:
-            # t2i loss
-            loss_t2i = F.cross_entropy(
-                logits[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1, self.output_size),
-                labels[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1), ignore_index=-100,
-                )
-        
-        # llada loss  
-
-        start_lm = batch_size_t2i
-        end_lm = start_lm + batch_size_lm
-        start_mmu = end_lm
-        end_mmu = start_mmu + batch_size_mmu
-        start_r2i = end_mmu
-        end_r2i = start_r2i + batch_size_r2i
-
-        masked_indices = input_ids == self.config.mask_token_id 
-        masked_indices_lm = masked_indices[start_lm:end_lm]
-        masked_indices_mmu = masked_indices[start_mmu:end_mmu]
-        masked_indices_r2i = masked_indices[start_r2i:end_r2i]
-
-        p_mask_lm = p_mask_lm.to(masked_indices_lm.device)
-        p_mask_mmu = p_mask_mmu.to(masked_indices_mmu.device)
-        p_mask_r2i = p_mask_r2i.to(masked_indices_r2i.device)
-
-        answer_lengths = answer_lengths.to(masked_indices_mmu.device) 
-        answer_lengths_lm = answer_lengths_lm.to(masked_indices_lm.device)
-        answer_lengths_r2i = answer_lengths_r2i.to(masked_indices_r2i.device)
-
-        loss_lm = F.cross_entropy(
-            logits[start_lm:end_lm][masked_indices_lm].contiguous().view(-1, self.output_size),
-            labels[start_lm:end_lm][masked_indices_lm].contiguous().view(-1), ignore_index=-100, reduction='none'
-            )/p_mask_lm[masked_indices_lm]
-
-        if answer_lengths_lm is not None:
-            loss_lm = torch.sum(loss_lm / answer_lengths_lm[masked_indices_lm]) / (logits[start_lm:end_lm].shape[0]) 
-        else:
-            loss_lm = loss_lm.sum() / (logits[start_lm:end_lm].shape[0] * logits[start_lm:end_lm].shape[1])
-
-        loss_mmu = F.cross_entropy(
-            logits[start_mmu:end_mmu][masked_indices_mmu].contiguous().view(-1, self.output_size),
-            labels[start_mmu:end_mmu][masked_indices_mmu].contiguous().view(-1), ignore_index=-100, reduction='none'
-            )/p_mask_mmu[masked_indices_mmu]
-        loss_mmu = torch.sum(loss_mmu/answer_lengths[masked_indices_mmu]) / (logits[start_mmu:end_mmu].shape[0])
-        
-        loss_r2i = F.cross_entropy(
-            logits[start_r2i:end_r2i][masked_indices_r2i].contiguous().view(-1, self.output_size),
-            labels[start_r2i:end_r2i][masked_indices_r2i].contiguous().view(-1), ignore_index=-100, reduction='none'
-            )/p_mask_r2i[masked_indices_r2i]
-        loss_r2i = torch.sum(loss_r2i/answer_lengths_r2i[masked_indices_r2i]) / (logits[start_r2i:end_r2i].shape[0])
-        
-        return logits, loss_t2i, loss_lm, loss_mmu, loss_r2i
-
-
-    def forward_t2i(
-            self,
-            input_ids, 
-            labels,
-            batch_size_t2i=0,
-            max_seq_length=128,
-            t2i_masks=None
-            ):
-        # attention bias, True for batch_size, 1, seq_len, seq_len  
-        attention_bias = torch.ones(input_ids.shape[0], 1, input_ids.shape[1], input_ids.shape[1])
-        attention_bias_t2i = (t2i_masks[:, :, None] & t2i_masks[:, None, :]).bool().unsqueeze(1)
-        attention_bias[:batch_size_t2i] = attention_bias_t2i
-        logits = self(input_ids, attention_bias=attention_bias).logits 
-        # logits = self(input_ids).logits
-        self.output_size = logits.shape[-1]
-
-        # print(f"logits shape: {logits.shape}") B, 359, vocab_size
-
-        loss_t2i = F.cross_entropy(
-            logits[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1, self.output_size),
-            labels[:batch_size_t2i, max_seq_length + 1:].contiguous().view(-1), ignore_index=-100,
-            )
-        
-        return loss_t2i
-
-
-
-
-
-    @torch.no_grad()
-    def mmu_generate(self, idx=None, input_embeddings=None, max_new_tokens=128, steps=128,block_length=128, temperature=0.0, top_k=None, eot_token=None, cfg_scale=0.0, remasking='low_confidence', mask_id=126336, attention_mask=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-
-        if attention_mask is not None and 0.0 in attention_mask:
-            attention_bias = (attention_mask[:, :, None] & attention_mask[:, None, :]).bool().unsqueeze(1)
-            # print(f"attention_bias: {attention_bias}")
-        else:
-            attention_bias = None
-        try:
-            device = idx.device
-        except:
-            device = input_embeddings.device
-
-        result = []
-        batch_size = idx.shape[0]
-        x = torch.full((batch_size, idx.shape[1] + max_new_tokens), mask_id, dtype=torch.long).to(self.device)
-        x[:, :idx.shape[1]] = idx.clone()
-        prompt_index = (x != mask_id)
-        
-        
-        assert max_new_tokens % block_length == 0
-        num_blocks = max_new_tokens // block_length
-
-        assert steps % num_blocks == 0
-        steps = steps // num_blocks
-        
-        # print(f"num_blocks: {num_blocks}, steps: {steps}")
-        # num_transfer_tokens = get_num_transfer_tokens(prompt_index, steps)
-        for num_block in range(num_blocks):
-            block_mask_index = (x[:, idx.shape[1] + num_block * block_length: idx.shape[1] + (num_block + 1) * block_length:] == mask_id)
-            num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
-            # num_transfer_tokens = get_num_transfer_tokens(prompt_index, steps)
-            # print(f"num_transfer_tokens: {num_transfer_tokens}, num_transfer_tokens.shape: {num_transfer_tokens.shape}")
-            for i in range(steps):
-                mask_index = (x == mask_id) 
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    un_x[prompt_index] = mask_id
-                    x_ = torch.cat([x, un_x], dim=0)
-                    logits = self(x_).logits
-                    logits, un_logits = torch.chunk(logits, 2, dim=0)
-                    logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
-                else:
-                    logits = self(x, attention_bias=attention_bias).logits
-                
-                logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-                x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
-                if remasking == 'low_confidence':
-                    p = F.softmax(logits.to(torch.float64), dim=-1)
-                    x0_p = torch.squeeze(
-                        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
-                elif remasking == 'random':
-                    x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
-                else:
-                    raise NotImplementedError(remasking)
-
-                x0_p[:, idx.shape[1] + (num_block + 1) * block_length:] = -np.inf
-
-                x0 = torch.where(mask_index, x0, x)
-                confidence = torch.where(mask_index, x0_p, -np.inf)
-
-                transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
-                for j in range(confidence.shape[0]):
-                    _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
-                    transfer_index[j, select_index] = True
-                x[transfer_index] = x0[transfer_index]
-                
-            
-            # logits = logits[:, -1, :] / temperature
-            # # optionally crop the logits to only the top k options
-            # if top_k is not None:
-            #     v, _ = torch.topk(logits, min(top_k, logits.size(-1)))
-            #     logits[logits < v[:, [-1]]] = -float('Inf')
-            # # apply softmax to convert logits to (normalized) probabilities
-            # probs = F.softmax(logits, dim=-1)
-            # # sample from the distribution
-            # idx_next = torch.multinomial(probs, num_samples=1)
-            # result.append(idx_next[0][0])
-            # # append sampled index to the running sequence and continue
-            # if self.config.w_clip_vit:
-            #     idx_next_embeddings = self.mmada.model.embed_tokens(idx_next)
-            #     input_embeddings = torch.cat([input_embeddings, idx_next_embeddings], dim=1)
-            # else:
-            #     idx = torch.cat((idx, idx_next), dim=1)
-
-            # if eot_token is not None and idx_next.cpu() == eot_token:
-            #     break
-
-        return x
-
-    @torch.no_grad()
-    def mmu_generate_fast(self, idx=None, input_embeddings=None, max_new_tokens=128, steps=128,block_length=128, temperature=0.0, top_k=None, eot_token=None, cfg_scale=0.0, remasking='low_confidence', mask_id=126336, attention_mask=None):
-        """
-        Take a conditioning sequence of indices idx (LongTensor of shape (b,t)) and complete
-        the sequence max_new_tokens times, feeding the predictions back into the model each time.
-        Most likely you'll want to make sure to be in model.eval() mode of operation for this.
-        """
-
-        if attention_mask is not None and 0.0 in attention_mask:
-            attention_bias = (attention_mask[:, :, None] & attention_mask[:, None, :]).bool().unsqueeze(1)
-            # print(f"attention_bias: {attention_bias}")
-        else:
-            attention_bias = None
-        try:
-            device = idx.device
-        except:
-            device = input_embeddings.device
-
-        result = []
-        batch_size = idx.shape[0]
-        x = torch.full((batch_size, idx.shape[1] + max_new_tokens), mask_id, dtype=torch.long).to(self.device)
-        x[:, :idx.shape[1]] = idx.clone()
-        prompt_index = (x != mask_id)
-        
-        
-        assert max_new_tokens % block_length == 0
-        num_blocks = max_new_tokens // block_length
-
-        assert steps % num_blocks == 0
-        steps = steps // num_blocks
-        
-        for num_block in range(num_blocks):
-            block_mask_index = (x[:, idx.shape[1] + num_block * block_length: idx.shape[1] + (num_block + 1) * block_length:] == mask_id)
-            num_transfer_tokens = get_num_transfer_tokens(block_mask_index, steps)
-            for i in range(steps):
-                mask_index = (x == mask_id) 
-                if cfg_scale > 0.0:
-                    un_x = x.clone()
-                    un_x[prompt_index] = mask_id
-                    x_ = torch.cat([x, un_x], dim=0)
-                    logits = self(x_).logits
-                    logits, un_logits = torch.chunk(logits, 2, dim=0)
-                    logits = un_logits + (cfg_scale + 1) * (logits - un_logits)
-                else:
-                    logits = self(x, attention_bias=attention_bias).logits
-                
-                logits_with_noise = add_gumbel_noise(logits, temperature=temperature)
-                x0 = torch.argmax(logits_with_noise, dim=-1) # b, l
-                if remasking == 'low_confidence':
-                    p = F.softmax(logits.to(torch.float64), dim=-1)
-                    x0_p = torch.squeeze(
-                        torch.gather(p, dim=-1, index=torch.unsqueeze(x0, -1)), -1) # b, l
-                elif remasking == 'random':
-                    x0_p = torch.rand((x0.shape[0], x0.shape[1]), device=x0.device)
-                else:
-                    raise NotImplementedError(remasking)
-
-                x0_p[:, idx.shape[1] + (num_block + 1) * block_length:] = -np.inf
-
-                x0 = torch.where(mask_index, x0, x)
-                confidence = torch.where(mask_index, x0_p, -np.inf)
-
-                transfer_index = torch.zeros_like(x0, dtype=torch.bool, device=x0.device)
-                for j in range(confidence.shape[0]):
-                    _, select_index = torch.topk(confidence[j], k=num_transfer_tokens[j, i])
-                    transfer_index[j, select_index] = True
-                x[transfer_index] = x0[transfer_index]
-            if eot_token is not None:
-                last_token_index_in_current_block = idx.shape[1] + (num_block + 1) * block_length - 1
-                if last_token_index_in_current_block < x.shape[1]:
-                    tokens_at_block_end = x[:, last_token_index_in_current_block]
-                    if torch.all(tokens_at_block_end == eot_token):
-                        break
-        return x
-
-    @torch.no_grad()
-    def t2i_generate_decoding_stepwise(
-            self,
-            input_ids: torch.LongTensor = None,
-            uncond_input_ids: torch.LongTensor = None,
-            attention_mask=None,
-            uncond_attention_mask=None,
-            temperature=1.0,
-            timesteps=18,  # ideal number of steps is 18 in maskgit paper
-            guidance_scale=0,
-            noise_schedule=cosine_schedule,
-            generator: torch.Generator = None,
-            config=None,
-            seq_len=1024,
-            mask_token_id = 126336,
-            resolution = 512,
-            codebook_size = 8192,
-            vq_model = None,
-            **kwargs,
+        self,
+        selfies_input_ids: torch.LongTensor,
+        selfies_attention_mask: torch.LongTensor,
+        text_input_ids: torch.LongTensor,
+        text_attention_mask: torch.LongTensor,
+        atom_vec: torch.LongTensor, # 真实的原子类型
+        coordinates: torch.FloatTensor, # 真实的 3D 坐标
+        atoms_mask: torch.BoolTensor,
+        edge_type: Optional[torch.LongTensor] = None,
+        bond_type: Optional[torch.LongTensor] = None,
+        dist: Optional[torch.FloatTensor] = None,
+        rdmol2selfies: Optional[torch.FloatTensor] = None,
+        labels: Optional[torch.FloatTensor] = None, # 这里的 labels 接收的是真实坐标
+        **kwargs,
     ):
-        """
-        Generate 1:1 similar to the original MaskGit repo
-        https://github.com/google-research/maskgit/blob/main/maskgit/libml/parallel_decode.py#L79
-        """
+        batch_size = coordinates.shape[0]
+        
+        # 随机采样一个噪声时间步
+        timesteps = torch.randint(0, self.config.diffusion_timesteps, (batch_size,), device=coordinates.device).long()
+        
+        # 对坐标添加高斯噪声 (DDPM 风格)
+        noise = torch.randn_like(coordinates)
+        alpha_bar_t = self.get_alpha_bar(timesteps) 
+        
+        # (B, 1, 1) or (B, 1)
+        sqrt_alpha_bar_t = alpha_bar_t.sqrt().unsqueeze(-1) 
+        sqrt_one_minus_alpha_bar_t = (1.0 - alpha_bar_t).sqrt().unsqueeze(-1)
+        
+        noisy_coordinates = sqrt_alpha_bar_t * coordinates + \
+                            sqrt_one_minus_alpha_bar_t * noise
+        
+        # 调用 MMadaModelLM 的主要前向方法 (self.forward)
+        # 它将返回预测的 coordinates 和 atom_type_logits
+        predicted_coordinates, predicted_atom_type_logits = self.forward(
+            selfies_input_ids=selfies_input_ids,
+            selfies_attention_mask=selfies_attention_mask,
+            text_input_ids=text_input_ids,
+            text_attention_mask=text_attention_mask,
+            atom_vec=atom_vec, # 传入真实的原子类型作为条件
+            coordinates=noisy_coordinates, # 传入噪声化的坐标
+            atoms_mask=atoms_mask,
+            edge_type=edge_type, 
+            bond_type=bond_type, 
+            dist=dist,           
+            rdmol2selfies=rdmol2selfies,
+            timesteps=timesteps, # 传递时间步
+        )
 
-        # begin with all image token ids masked
-        # 计算有多少个mask token
-        mask_count = (input_ids == mask_token_id).sum().item()
-        num_vq_tokens = seq_len
-        num_new_special_tokens = 0
-        uni_prompting = kwargs.get("uni_prompting", None)
-        # print(f"config.model.mmada.llm_vocab_size: {config.model.mmada.llm_vocab_size}, {len(uni_prompting.text_tokenizer)}")
-        input_ids_minus_lm_vocab_size = input_ids[:, -(num_vq_tokens + 1):-1].clone()
-        input_ids_minus_lm_vocab_size = torch.where(input_ids_minus_lm_vocab_size == mask_token_id, mask_token_id, input_ids_minus_lm_vocab_size - len(uni_prompting.text_tokenizer) - num_new_special_tokens)
+        # --- 损失计算 ---
+        # true_coordinates 是真实的干净坐标 (来自 DataLoader，通过 labels 传入)
+        true_coordinates = labels 
+        true_atom_vec = atom_vec # 真实的原子类型 ID
 
-        # for classifier-free guidance
-        if uncond_input_ids is not None:
-            uncond_prefix = uncond_input_ids[:, :resolution + 1]
+        # 1. 坐标预测损失 (MSE Loss)
+        # 只在真实原子位置计算损失
+        coords_loss = F.mse_loss(
+            predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
+            true_coordinates * atoms_mask.unsqueeze(-1).float(),
+            reduction='sum'
+        ) / (atoms_mask.sum().float() + 1e-5) # 平均每个真实原子的损失
 
-        for step in range(timesteps):
-            if uncond_input_ids is not None and guidance_scale > 0:
-                uncond_input_ids = torch.cat(
-                    [uncond_prefix, input_ids[:, resolution + 1:]], dim=1)
-                model_input = torch.cat([input_ids, uncond_input_ids])
-                attention_mask = torch.cat([attention_mask, uncond_attention_mask], dim=0)
-                attention_bias = (attention_mask[:, :, None] & attention_mask[:, None, :]).bool().unsqueeze(1)
-                logits = self(model_input, attention_bias=attention_bias).logits 
-                # print(f"logits.shape: {logits.shape}")
-                cond_logits, uncond_logits = torch.chunk(logits, 2, dim=0)
-                # logits = uncond_logits + guidance_scale * (cond_logits - uncond_logits)
-                # it seems that muse has a different cfg setting
-                logits = (1 + guidance_scale) * cond_logits - guidance_scale * uncond_logits
-                logits = logits[:, -(num_vq_tokens + 1):-1, len(uni_prompting.text_tokenizer) + num_new_special_tokens: len(uni_prompting.text_tokenizer) + num_new_special_tokens + codebook_size]
-            else:
-                attention_bias = (attention_mask[:, :, None] & attention_mask[:, None, :]).bool().unsqueeze(1)
-                logits = self(input_ids, attention_bias=attention_bias).logits
-                logits = logits[:, -(num_vq_tokens + 1):-1, len(uni_prompting.text_tokenizer) + num_new_special_tokens: len(uni_prompting.text_tokenizer) + num_new_special_tokens + codebook_size]
+        # 2. 原子类型预测损失 (Cross-Entropy Loss)
+        # 只在真实原子位置计算损失
+        # predicted_atom_type_logits: (B, N_max, num_atom_types)
+        # true_atom_vec: (B, N_max)
+        
+        # 将 logits 和 labels 展平，只考虑真实原子
+        atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
+        true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1)
 
-            # logits: 1, 1024, 8192
-            # print(f"logits.shape: {logits.shape}")
-            probs = logits.softmax(dim=-1)
-            sampled = probs.reshape(-1, logits.size(-1))
-            # print(f"probs: {probs}, probs.shape: {probs.shape}, sampled: {sampled}, sampled.shape: {sampled.shape}")
-            sampled_ids = torch.multinomial(sampled, 1, generator=generator)[:, 0].view(*logits.shape[:-1]) # 1, 1024
+        # 确保 target 不会是 padding_idx，或者 ignore_index 设置正确
+        # config.pad_token_id 是LLM的pad token，不一定是原子类型的padding_idx
+        # 如果 atom_to_id 0 是 unknown，且不希望它参与损失计算，可以 ignore_index=0
+        atom_type_loss = F.cross_entropy(
+            atom_type_logits_flat,
+            true_atom_vec_flat,
+            ignore_index=0, # 假设原子 ID 0 是未知/填充原子，不参与损失计算
+            reduction='mean'
+        )
 
-            unknown_map = input_ids_minus_lm_vocab_size == mask_token_id
-            # print(f"unknown_map.sum(dim=-1, keepdim=True): {unknown_map.sum(dim=-1, keepdim=True)}")
-            sampled_ids = torch.where(unknown_map, sampled_ids, input_ids_minus_lm_vocab_size)
-            # Defines the mask ratio for the next round. The number to mask out is
-            current_image_vq_indices = sampled_ids.clone()
-            # print(f"current_image_vq_indices: {current_image_vq_indices}")
-            current_image_vq_indices = torch.clamp(current_image_vq_indices, 0, 8192 - 1)
-            current_image = vq_model.decode_code(current_image_vq_indices)
-            images = torch.clamp((current_image + 1.0) / 2.0, min=0.0, max=1.0)
-            images *= 255.0
-            images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-            pil_images = Image.fromarray(images[0]) 
-            yield pil_images, f"Step {step + 1}/{timesteps}"
-            # determined by mask_ratio * unknown_number_in_the_beginning.
-            ratio = 1.0 * (step + 1) / timesteps
-            mask_ratio = noise_schedule(torch.tensor(ratio))
-            # Computes the probabilities of each selected tokens.
-            selected_probs = torch.gather(probs, -1, sampled_ids.long()[..., None])
-            selected_probs = selected_probs.squeeze(-1)
+        # 总损失
+        # 你可以为坐标损失和原子类型损失设置权重
+        loss = coords_loss + atom_type_loss # 简单相加
 
-            # Ignores the tokens given in the input by overwriting their confidence.
-            selected_probs = torch.where(unknown_map, selected_probs, torch.finfo(selected_probs.dtype).max)
-            # Gets mask lens for each sample in the batch according to the mask ratio.
-            mask_len = (num_vq_tokens * mask_ratio).floor().unsqueeze(0).to(logits.device)
-            # Keeps at least one of prediction in this round and also masks out at least
-            # one and for the next iteration
-            mask_len = torch.max(
-                torch.tensor([1], device=logits.device), torch.min(unknown_map.sum(dim=-1, keepdim=True) - 1, mask_len)
-            )
-            # print(f"mask_len: {mask_len}, mask_len.shape: {mask_len.shape}")
-            # Adds noise for randomness
-            temperature = temperature * (1.0 - ratio)
-            masking = mask_by_random_topk(mask_len, selected_probs, temperature, generator=generator)
-            # Masks tokens with lower confidence.
-            input_ids[:, -(num_vq_tokens + 1):-1] = torch.where(masking, mask_token_id,
-                                                          sampled_ids + len(uni_prompting.text_tokenizer)
-                                                          + num_new_special_tokens)
-            input_ids_minus_lm_vocab_size = torch.where(masking, mask_token_id, sampled_ids)
-            
-
-        return sampled_ids
-    
+        # 返回总损失
+        return loss
 
 AutoConfig.register("mmada", MMadaConfig)
 AutoModelForCausalLM.register(MMadaConfig, MMadaModelLM)

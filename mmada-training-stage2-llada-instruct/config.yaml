@@ -1,0 +1,80 @@
+wandb:
+  entity: null
+  resume: auto
+  run_id: x17cu0ld
+experiment:
+  project: mmada-training-stage2
+  name: mmada-training-stage2-llada-instruct
+  output_dir: mmada-training-stage2-llada-instruct
+  max_train_examples_molecular: 1000
+  save_every: 10000
+  eval_every: 2500
+  log_every: 50
+  log_grad_norm_every: 100
+  resume_from_checkpoint: latest
+  logging_dir: mmada-training-stage2-llada-instruct/logs
+model:
+  mmada:
+    tokenizer_path: GSAI-ML/LLaDA-8B-Instruct
+    pretrained_model_path: GSAI-ML/LLaDA-8B-Instruct
+    w_clip_vit: false
+    new_vocab_size: 134656
+    llm_vocab_size: 126464
+    num_new_special_tokens: 0
+    tie_word_embeddings: false
+    mol_atom_embedding_dim: 128
+    mol_coord_embedding_dim: 64
+    mol_3d_encoder_output_dim: 768
+    fusion_hidden_dim: 1536
+    final_condition_dim: 4096
+    num_atom_types: 120
+    output_atom_coords_dim: 3
+    output_atom_type_dim: 120
+    diffusion_timesteps: 1000
+    noise_schedule_beta_start: 0.0001
+    noise_schedule_beta_end: 0.02
+    gradient_checkpointing: true
+dataset:
+  params:
+    shuffle_buffer_size: 1000
+    num_workers: 0
+    pin_memory: true
+    persistent_workers: false
+  preprocessing:
+    max_seq_length: 256
+dataset_type: molecular
+data_path: /home/exouser/MMaDA/m3_molecular_data.parquet
+max_selfies_length: 256
+max_atoms: 256
+include_edge_bond_dist: true
+include_rdmol2selfies: false
+optimizer:
+  name: adamw
+  params:
+    learning_rate: 5.0e-05
+    scale_lr: false
+    beta1: 0.9
+    beta2: 0.999
+    weight_decay: 0.01
+    epsilon: 1.0e-08
+lr_scheduler:
+  scheduler: cosine
+  params:
+    learning_rate: ${optimizer.params.learning_rate}
+    warmup_steps: 5000
+    min_lr_scale: 0.1
+training:
+  gradient_accumulation_steps: 2
+  noise_type: mask
+  batch_size: 2
+  mixed_precision: bf16
+  enable_tf32: true
+  seed: 10086
+  max_train_steps: 1000000
+  overfit_one_batch: false
+  cond_dropout_prob: 0.1
+  min_masking_rate: 0.0
+  label_smoothing: 0.0
+  max_grad_norm: 1
+  guidance_scale: 3
+  generation_timesteps: 12

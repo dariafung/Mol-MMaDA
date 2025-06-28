@@ -28,14 +28,26 @@ model:
         tokenizer_path: "GSAI-ML/LLaDA-8B-Instruct"
         pretrained_model_path: "GSAI-ML/LLaDA-8B-Instruct"
         w_clip_vit: False
-        # new_vocab_size: 134656
-        # llm_vocab_size: 126464
+        new_vocab_size: 134656
+        llm_vocab_size: 126464
         # codebook_size: 8192
         # num_vq_tokens: 256
         num_new_special_tokens: 0
         tie_word_embeddings: False
 
-    gradient_checkpointing: True
+        mol_atom_embedding_dim: 128
+        mol_coord_embedding_dim: 64
+        mol_3d_encoder_output_dim: 768
+        fusion_hidden_dim: 1536
+        final_condition_dim: 4096
+        num_atom_types: 120
+        output_atom_coords_dim: 3
+        output_atom_type_dim: 120
+        diffusion_timesteps: 1000
+        noise_schedule_beta_start: 0.0001
+        noise_schedule_beta_end: 0.02
+
+        gradient_checkpointing: True
 
 dataset:
     # gen_type: "t2i"
@@ -59,10 +71,10 @@ dataset:
         # validation_prompts_file: "validation_prompts/text2image_prompts.txt"
         # mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
         shuffle_buffer_size: 1000
-        num_workers: 32
+        num_workers: 0
         # resolution: 256
         pin_memory: True
-        persistent_workers: True
+        persistent_workers: False
 
     preprocessing:
         max_seq_length: 256 # for text tokens
