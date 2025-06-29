@@ -51,6 +51,7 @@ from torch.utils.data import DataLoader, Dataset
 from torch.utils.data.distributed import DistributedSampler
 
 import selfies
+import torch.nn.functional as F
 
 from parquet.my_dataset import MolecularUnifiedDataset
 
@@ -60,6 +61,97 @@ SYSTEM_PROMPT_LEN = 28
 from training.utils import get_config, flatten_omega_conf, AverageMeter
 
 logger = get_logger(__name__, log_level="INFO")
+
+# 将 prepare_molecular_inputs_and_labels 函数定义在 main 函数外部，以便它能访问到 model_ref
+# 并且能够接收 mask_schedule_coords 参数
+@torch.no_grad()
+def prepare_molecular_inputs_and_labels(
+    batch: Dict[str, torch.Tensor],
+    accelerator_device: torch.device,
+    config: Any, # Pass the full config object
+    mask_schedule_coords: Callable, # Pass the coordinate noise scheduler
+    task_type: str, # '1d_to_3d', '3d_to_1d', 'multimodal_joint'
+    model_ref: Any # Pass the model instance to access get_alpha_bar
+) -> Dict[str, Optional[torch.Tensor]]:
+    """
+    根据任务类型准备分子数据的输入和标签。
+
+    Args:
+        batch: 从 DataLoader 获取的原始批次数据。
+        accelerator_device: 加速器所在的设备（CPU/GPU）。
+        config: 配置文件对象。
+        mask_schedule_coords: 用于坐标噪声的调度器函数。
+        task_type: 当前批次要处理的任务类型（例如 '1d_to_3d'）。
+        model_ref: 模型实例，用于访问 get_alpha_bar 等方法。
+
+    Returns:
+        一个字典，包含准备好的模型输入和损失计算所需的真实标签。
+    """
+    # 将所有批次张量移动到适当的设备
+    selfies_input_ids = batch["selfies_input_ids"].to(accelerator_device)
+    selfies_attention_mask = batch["selfies_attention_mask"].to(accelerator_device)
+    text_input_ids = batch["text_input_ids"].to(accelerator_device)
+    text_attention_mask = batch["text_attention_mask"].to(accelerator_device)
+    atom_vec = batch["atom_vec"].to(accelerator_device)
+    coordinates = batch["coordinates"].to(accelerator_device) # 这是原始的干净坐标
+    atoms_mask = batch["atoms_mask"].to(accelerator_device)
+
+    # 这些将是 model.forward() 的实际输入
+    # Initialize with original values, then modify based on task_type
+    model_inputs = {
+        "selfies_input_ids": selfies_input_ids,
+        "selfies_attention_mask": selfies_attention_mask,
+        "text_input_ids": text_input_ids,
+        "text_attention_mask": text_attention_mask,
+        "atom_vec": atom_vec,
+        "coordinates": coordinates, # This will be the *input* coordinates to the model
+        "atoms_mask": atoms_mask,
+        "llm_generate_input_ids": selfies_input_ids, # For 1D->3D, LLM processes selfies sequence
+        "llm_generate_attention_mask": selfies_attention_mask,
+    }
+
+    # 这些将是损失计算的真实目标
+    target_labels = {}
+
+    batch_size = selfies_input_ids.shape[0] # Assuming consistent batch size
+
+    if task_type == '1d_to_3d':
+        # 1D (SELFIES/Text) to 3D Generation Task
+        # Inputs: SELFIES, Text. Targets: 3D (denoised coordinates, atom types)
+        
+        # Apply noise to coordinates for diffusion input
+        timesteps_coords = torch.randint(0, config.model.mmada.diffusion_timesteps, (batch_size,), device=coordinates.device).long()
+        noise_coords = torch.randn_like(coordinates)
+        
+        # 从模型实例中获取 alpha_bar，因为 get_alpha_bar 是 MMadaModelLM 的方法
+        alpha_bar_t = model_ref.get_alpha_bar(timesteps_coords) 
+        sqrt_alpha_bar_t = alpha_bar_t.sqrt().unsqueeze(-1).unsqueeze(-1)
+        sqrt_one_minus_alpha_bar_t = (1.0 - alpha_bar_t).sqrt().unsqueeze(-1).unsqueeze(-1)
+        
+        # 模型的输入坐标是带有噪声的
+        model_inputs["coordinates"] = sqrt_alpha_bar_t * coordinates + sqrt_one_minus_alpha_bar_t * noise_coords
+        
+        # 真实的原始坐标和原子向量是损失计算的目标
+        target_labels["true_coordinates"] = coordinates.clone()
+        target_labels["true_atom_vec"] = atom_vec.clone()
+
+    elif task_type == '3d_to_1d':
+        # 3D 到 1D (SELFIES) 生成任务 (暂时不实现，仅为结构预留)
+        pass 
+    elif task_type == 'multimodal_joint':
+        # 多模态联合任务 (暂时不实现，仅为结构预留)
+        pass
+
+    # Combine model inputs and targets
+    prepared_batch = {**model_inputs, **target_labels}
+    
+    # Add task type to the batch for forward_process
+    prepared_batch['task_type'] = task_type
+    
+    # 传递噪声调度器到 forward_process (如果 forward_process 需要直接访问它们)
+    prepared_batch['mask_schedule_coords'] = mask_schedule_coords
+
+    return prepared_batch
 
 def main():
     #########################
@@ -175,7 +267,7 @@ def main():
         "llm_model_path": config.model.mmada.tokenizer_path, # 
         "num_new_special_tokens": config.model.mmada.num_new_special_tokens,
         "gradient_checkpointing": config.model.mmada.gradient_checkpointing, 
-        # 你的自定义分子参数
+       
         "mol_atom_embedding_dim": config.model.mmada.mol_atom_embedding_dim,
         "mol_coord_embedding_dim": config.model.mmada.mol_coord_embedding_dim,
         "mol_3d_encoder_output_dim": config.model.mmada.mol_3d_encoder_output_dim,
@@ -188,6 +280,12 @@ def main():
         "diffusion_timesteps": config.model.mmada.diffusion_timesteps,
         "noise_schedule_beta_start": config.model.mmada.noise_schedule_beta_start,
         "noise_schedule_beta_end": config.model.mmada.noise_schedule_beta_end,
+
+        "coords_coeff": config.training.coords_coeff,
+        "atom_type_coeff": config.training.atom_type_coeff,
+        "alignment_coeff": config.training.get("alignment_coeff", 0.0), 
+        "selfies_coeff": config.training.get("selfies_coeff", 0.0), 
+        "hierarchical_coeff": config.training.get("hierarchical_coeff", 0.0), 
     })
     
     # 5. 实例化一个完整的 MMadaConfig 对象
@@ -250,9 +348,11 @@ def main():
     if config.get("mask_schedule", None) is not None:
         schedule = config.mask_schedule.schedule
         args = config.mask_schedule.get("params", {})
-        mask_schedule = get_mask_schedule(schedule, **args)
+        llm_mask_schedule = get_mask_schedule(schedule, **args) 
     else:
-        mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine"))
+        llm_mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine")) 
+
+    mask_schedule_coords = get_mask_schedule(config.training.get("coords_mask_schedule", "cosine"))
 
     lr_scheduler = get_lr_scheduler(
         config.lr_scheduler.scheduler,
@@ -361,83 +461,52 @@ def main():
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
 
-    @torch.no_grad()
-    def prepare_molecular_inputs_and_labels(batch, accelerator_device):
-        """
-        准备分子数据集的输入和标签。
-        batch: 从 MolecularUnifiedDataset 的 DataLoader 中获取的批次数据。
-        accelerator_device: 模型所在的设备。
-        """
-        selfies_input_ids = batch["selfies_input_ids"].to(accelerator_device)
-        selfies_attention_mask = batch["selfies_attention_mask"].to(accelerator_device)
-        text_input_ids = batch["text_input_ids"].to(accelerator_device)
-        text_attention_mask = batch["text_attention_mask"].to(accelerator_device)
-        atom_vec = batch["atom_vec"].to(accelerator_device)
-        coordinates = batch["coordinates"].to(accelerator_device)
-        atoms_mask = batch["atoms_mask"].to(accelerator_device)
-
-        # 3D 辅助特征 (如果包含)
-        edge_type = batch.get("edge_type", None)
-        if edge_type is not None: edge_type = edge_type.to(accelerator_device)
-        bond_type = batch.get("bond_type", None)
-        if bond_type is not None: bond_type = bond_type.to(accelerator_device)
-        dist = batch.get("dist", None)
-        if dist is not None: dist = dist.to(accelerator_device)
-        rdmol2selfies = batch.get("rdmol2selfies", None)
-        if rdmol2selfies is not None: rdmol2selfies = rdmol2selfies.to(accelerator_device)
-
-        labels = coordinates.clone()
-
-        return (
-            selfies_input_ids, selfies_attention_mask,
-            text_input_ids, text_attention_mask,
-            atom_vec, coordinates, atoms_mask,
-            edge_type, bond_type, dist, rdmol2selfies,
-            labels # 返回 labels
-        )
-
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
 
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
-        # 直接迭代 train_dataloader，因为不再是 CombinedLoader
         for step, batch in enumerate(train_dataloader): 
             data_time_m.update(time.time() - end)
 
             # --- 准备新的输入 ---
-            (
-                selfies_input_ids, selfies_attention_mask,
-                text_input_ids, text_attention_mask,
-                atom_vec, coordinates, atoms_mask,
-                edge_type, bond_type, dist, rdmol2selfies,
-                labels # 接收 labels
-            ) = prepare_molecular_inputs_and_labels(batch, accelerator.device)
+            # 明确指定 task_type 为 '1d_to_3d'
+            # 传递 model 实例给 prepare_molecular_inputs_and_labels
+            prepared_batch = prepare_molecular_inputs_and_labels(
+                batch,
+                accelerator.device,
+                config,
+                mask_schedule_coords, # 传递 coords 调度器
+                '1d_to_3d', # 指定任务类型
+                model # 传递模型实例
+            )
 
             with accelerator.accumulate(model):
                 # --- 将新输入传递给模型 ---
-                # 这部分需要你修改 MMadaModelLM 的 forward_process 函数来接受这些参数
-                # 假设 forward_process 返回一个标量损失
-                loss = model.forward_process(
-                    selfies_input_ids=selfies_input_ids,
-                    selfies_attention_mask=selfies_attention_mask,
-                    text_input_ids=text_input_ids,
-                    text_attention_mask=text_attention_mask, # 假设模型需要 attention mask
-                    atom_vec=atom_vec,
-                    coordinates=coordinates,
-                    atoms_mask=atoms_mask,
-                    edge_type=edge_type, 
-                    bond_type=bond_type, 
-                    dist=dist,           
-                    rdmol2selfies=rdmol2selfies,
-                    labels=labels # 传递 labels
+                # model.forward_process 现在接受更多参数
+                total_loss, individual_losses = model.forward_process(
+                    selfies_input_ids=prepared_batch["selfies_input_ids"],
+                    selfies_attention_mask=prepared_batch["selfies_attention_mask"],
+                    text_input_ids=prepared_batch["text_input_ids"],
+                    text_attention_mask=prepared_batch["text_attention_mask"],
+                    atom_vec=prepared_batch["atom_vec"],
+                    coordinates=prepared_batch["coordinates"], # 这是带噪声的输入坐标
+                    atoms_mask=prepared_batch["atoms_mask"],
+                    task_type=prepared_batch["task_type"], # '1d_to_3d'
+                    # 传递真实标签
+                    true_coordinates=prepared_batch.get("true_coordinates"),
+                    true_atom_vec=prepared_batch.get("true_atom_vec"),
+                    # 暂时不传 selfies 相关，因为是 1D->3D 任务
+                    # true_selfies_labels=prepared_batch.get("true_selfies_labels"), # No longer passed for 1D->3D
+                    mask_schedule_coords=mask_schedule_coords, # 传递 coords 调度器
                 )
 
                 # Gather the loss across all processes
-                avg_loss = accelerator.gather(loss.repeat(config.training.batch_size)).mean()
+                # total_loss 和 individual_losses 是从 model.forward_process 返回的
+                avg_loss = accelerator.gather(total_loss.repeat(config.training.batch_size)).mean()
                 
-                accelerator.backward(loss)
+                accelerator.backward(total_loss) # 使用 total_loss 进行反向传播
 
                 if config.training.max_grad_norm is not None and accelerator.sync_gradients:
                     accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
@@ -466,12 +535,16 @@ def main():
                             config.training.gradient_accumulation_steps * config.training.batch_size / batch_time_m.val
                     )
                     logs = {
-                        "step_loss": avg_loss.item(), # 只有一个总损失
+                        "total_loss": avg_loss.item(), # 总损失
                         "lr": lr_scheduler.get_last_lr()[0],
                         "samples/sec/gpu": samples_per_second_per_gpu,
                         "data_time": data_time_m.val,
                         "batch_time": batch_time_m.val,
                     }
+                    # 记录 individual_losses
+                    for loss_name, loss_value in individual_losses.items():
+                        logs[f"loss/{loss_name}"] = accelerator.gather(loss_value.repeat(config.training.batch_size)).mean().item()
+                    
                     accelerator.log(logs, step=global_step + 1)
                     logger.info(
                         f"Step: {global_step + 1} "

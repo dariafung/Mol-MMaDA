@@ -24,37 +24,39 @@ from typing import List, Optional, Tuple, Union
 import numpy as np
 import torch
 import torch.backends.cuda
-import torch.nn as nn 
+import torch.nn as nn
 import torch.nn.functional as F
 from torch import einsum
-from transformers.modeling_outputs import CausalLMOutputWithPast 
+from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.auto import AutoModel, AutoConfig, AutoModelForCausalLM
 from transformers.cache_utils import Cache
 
 
-from .modeling_llada import LLaDAModelLM 
+from .modeling_llada import LLaDAModelLM # <-- 仍然需要导入 LLaDAModelLM
 
-from .sampling import cosine_schedule 
+from .sampling import cosine_schedule
 from transformers import PretrainedConfig
 
-from .common_modules import MLP
+from .common_modules import MLP # Assumed MLP is in common_modules.py or defined globally
 
+
+# --- 新增 3D 分子编码器 ---
 class Molecular3DEncoder(nn.Module):
-    def __init__(self, config: "MMadaConfig"): 
+    def __init__(self, config: "MMadaConfig"):
         super().__init__()
         self.atom_embedding = nn.Embedding(
-            config.num_atom_types, config.mol_atom_embedding_dim, padding_idx=0 
+            config.num_atom_types, config.mol_atom_embedding_dim, padding_idx=0
         )
         self.coord_projection = nn.Linear(3, config.mol_coord_embedding_dim)
 
         self.per_atom_mlp = nn.Sequential(
             nn.Linear(config.mol_atom_embedding_dim + config.mol_coord_embedding_dim, config.fusion_hidden_dim),
-            nn.GELU(), 
+            nn.GELU(),
             nn.Linear(config.fusion_hidden_dim, config.mol_3d_encoder_output_dim)
         )
 
     def forward(self, atom_vec: torch.LongTensor, coordinates: torch.FloatTensor, atoms_mask: torch.BoolTensor):
-        atom_embeds = self.atom_embedding(atom_vec) 
+        atom_embeds = self.atom_embedding(atom_vec)
         coord_embeds = self.coord_projection(coordinates)
         
         fused_atom_coord_embeds = torch.cat([atom_embeds, coord_embeds], dim=-1)
@@ -74,31 +76,31 @@ class MMadaConfig(PretrainedConfig):
         super().__init__(**kwargs)
         
         allowed_keys = [
-            "d_model", 
-            "vocab_size", 
-            "llm_vocab_size", # LLM 的原始词汇表大小
-            "llm_model_path", # LLM 预训练模型路径
-            "mask_token_id", 
+            "d_model",
+            "vocab_size",
+            "llm_vocab_size",
+            "llm_model_path",
+            "mask_token_id",
             "pad_token_id",
-            "max_sequence_length", # LLM 的最大序列长度
+            "max_sequence_length",
             
-            "num_new_special_tokens", 
+            "num_new_special_tokens",
             "gradient_checkpointing",
-            "new_vocab_size", 
+            "new_vocab_size", # This might be redundant if llm_vocab_size covers the resized vocab
 
-            "mol_atom_embedding_dim", 
-            "mol_coord_embedding_dim", 
-            "mol_3d_encoder_output_dim", 
-            "fusion_hidden_dim", 
-            "final_condition_dim", 
-            "num_atom_types", 
-            "max_atoms", 
-            "output_atom_coords_dim", 
-            "output_atom_type_dim", 
-            "diffusion_timesteps", 
-            "noise_schedule_beta_start", 
+            "mol_atom_embedding_dim",
+            "mol_coord_embedding_dim",
+            "mol_3d_encoder_output_dim",
+            "fusion_hidden_dim",
+            "final_condition_dim",
+            "num_atom_types",
+            "max_atoms",
+            "output_atom_coords_dim",
+            "output_atom_type_dim",
+            "diffusion_timesteps",
+            "noise_schedule_beta_start",
             "noise_schedule_beta_end",
-
+            # 新增的损失系数，确保它们能在 config 中被识别
             "coords_coeff",
             "atom_type_coeff",
             "alignment_coeff",
@@ -108,19 +110,19 @@ class MMadaConfig(PretrainedConfig):
 
         for key in allowed_keys:
             if key in kwargs:
-                setattr(self, key, kwargs[key])
+                setattr(self, key, kwargs[key]) # Use setattr directly if not facing ReadOnlyError
 
 
 class MMadaModelLM(nn.Module): 
 
-    def __init__(self, config: "MMadaConfig", base_llm_model: LLaDAModelLM, *args, **kwargs): # <-- 接收 base_llm_model
+    def __init__(self, config: "MMadaConfig", base_llm_model: LLaDAModelLM, *args, **kwargs):
         print(f"Initializing MMadaModelLM with config: {config}")
         super().__init__()
         
         self.config = config 
         self.llm_backbone = base_llm_model 
 
-        self.molecular_3d_encoder = Molecular3DEncoder(config)
+        self.molecular_3d_encoder = Molecular3DEncoder(config=config)
 
         fusion_input_dim = config.d_model * 2 + config.mol_3d_encoder_output_dim 
         
@@ -150,16 +152,16 @@ class MMadaModelLM(nn.Module):
         selfies_attention_mask: torch.LongTensor,
         text_input_ids: torch.LongTensor,
         text_attention_mask: torch.LongTensor,
-        atom_vec: torch.LongTensor, 
-        coordinates: torch.FloatTensor, 
+        atom_vec: torch.LongTensor, # 真实的原子类型
+        coordinates: torch.FloatTensor, # 真实的 3D 坐标 (这里接收的是要加噪/预测的坐标)
         atoms_mask: torch.BoolTensor,
         edge_type: Optional[torch.LongTensor] = None, 
         bond_type: Optional[torch.LongTensor] = None,
         dist: Optional[torch.FloatTensor] = None,
         rdmol2selfies: Optional[torch.FloatTensor] = None,
-        timesteps: Optional[torch.LongTensor] = None, 
+        timesteps: Optional[torch.LongTensor] = None, # 扩散时间步
         **kwargs, 
-    ) -> Tuple[torch.Tensor, torch.Tensor]: 
+    ) -> Tuple[torch.Tensor, torch.Tensor]: # 返回预测坐标和原子类型 logits
         """
         MMadaModelLM 的主要前向传播方法。
         接收多模态输入，融合后通过 LLM 主干，并预测 3D 结构。
@@ -170,11 +172,6 @@ class MMadaModelLM(nn.Module):
         selfies_embeds = self.llm_backbone.get_input_embeddings()(selfies_input_ids)# (B, L_selfies, D_model)
         text_embeds = self.llm_backbone.get_input_embeddings()(text_input_ids) # (B, L_text, D_model)
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: selfies_embeds shape: {selfies_embeds.shape}, device: {selfies_embeds.device}")
-        print(f"DEBUG_FWD: text_embeds shape: {text_embeds.shape}, device: {text_embeds.device}")
-        # --- END DEBUG PRINT ---
-        
         # 平均池化
         selfies_sum = (selfies_embeds * selfies_attention_mask.unsqueeze(-1).float()).sum(dim=1)
         selfies_count = selfies_attention_mask.sum(dim=1, keepdim=True).float() + 1e-5
@@ -187,10 +184,6 @@ class MMadaModelLM(nn.Module):
         # 2. 编码 3D 数据
         mol_3d_embeds = self.molecular_3d_encoder(atom_vec, coordinates, atoms_mask)
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: mol_3d_embeds shape: {mol_3d_embeds.shape}, device: {mol_3d_embeds.device}")
-        # --- END DEBUG PRINT ---
-
         # 3. 融合所有模态的嵌入
         fused_multimodal_embeds = torch.cat(
             [selfies_context_embeds, text_context_embeds, mol_3d_embeds], dim=-1
@@ -198,11 +191,7 @@ class MMadaModelLM(nn.Module):
         
         final_condition_embeds = self.multimodal_fusion_mlp(fused_multimodal_embeds)
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: final_condition_embeds shape: {final_condition_embeds.shape}, device: {final_condition_embeds.device}")
-        # --- END DEBUG PRINT ---
-        
-    # 4. 将融合后的条件嵌入作为 LLM 的条件（注入到 LLM 的输入中）
+        # 4. 将融合后的条件嵌入作为 LLM 的条件（注入到 LLM 的输入中）
         cond_llm_embeds = self.condition_to_llm_projection(final_condition_embeds) 
 
         condition_token_id = self.config.pad_token_id 
@@ -218,12 +207,6 @@ class MMadaModelLM(nn.Module):
 
         combined_attention_bias = (combined_attention_mask[:, :, None] & combined_attention_mask[:, None, :]).bool().unsqueeze(1)
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: LLM backbone input embeds shape: {combined_inputs_embeds.shape}, device: {combined_inputs_embeds.device}")
-        print(f"DEBUG_FWD: Calling llm_backbone forward...")
-        # --- END DEBUG PRINT ---
-
-        # 调用 LLaDAModelLM 骨干网络 (self.llm_backbone) 的 forward 方法
         llm_output: CausalLMOutputWithPast = self.llm_backbone( 
             inputs_embeds=combined_inputs_embeds, 
             attention_mask=combined_attention_mask,
@@ -232,21 +215,12 @@ class MMadaModelLM(nn.Module):
             return_dict=True,
         )
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: llm_backbone forward completed.")
-        # --- END DEBUG PRINT ---
-
         llm_last_hidden_state = llm_output.hidden_states[-1] 
 
         llm_output_for_prediction = llm_last_hidden_state[:, 1:, :] 
 
         pooled_llm_output = (llm_output_for_prediction * llm_text_selfies_attention_mask.unsqueeze(-1).float()).sum(dim=1) / \
                             (llm_text_selfies_attention_mask.sum(dim=1, keepdim=True).float() + 1e-5) 
-
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: pooled_llm_output shape: {pooled_llm_output.shape}, device: {pooled_llm_output.device}")
-        print(f"DEBUG_FWD: Applying prediction heads...")
-        # --- END DEBUG PRINT ---
 
         # 5. 应用预测头
         predicted_atom_type_logits_flat = self.atom_type_prediction_head(pooled_llm_output)
@@ -255,16 +229,11 @@ class MMadaModelLM(nn.Module):
         predicted_coordinates_flat = self.coordinates_prediction_head(pooled_llm_output)
         predicted_coordinates = predicted_coordinates_flat.view(batch_size, self.config.max_atoms, self.config.output_atom_coords_dim)
 
-        # --- DEBUG PRINT ---
-        print(f"DEBUG_FWD: Prediction heads completed.")
-        # --- END DEBUG PRINT ---
-
         return predicted_coordinates, predicted_atom_type_logits
 
     def get_alpha_bar(self, timesteps: torch.LongTensor) -> torch.FloatTensor:
         """从预计算的 alpha_bars 中获取指定时间步的值。"""
-        # 确保 alpha_bars 在正确的设备上
-        return self.alpha_bars[timesteps].to(timesteps.device)
+        return self.alpha_bars.to(timesteps.device)[timesteps]
 
     def forward_process( # 这个函数就是 train_mmada_stage2.py 中调用的
         self,
@@ -294,8 +263,9 @@ class MMadaModelLM(nn.Module):
         # 1D (SELFIES/Text) to 3D Generation Task (去噪坐标 & 原子类型)
         # 明确只处理 '1d_to_3d' 任务
         if task_type == '1d_to_3d':
-            # 直接调用 self.forward，传入加噪后的 coordinates 作为 3D 编码器输入
-            # 注意：这里不再对 coordinates 加噪，因为 prepare_molecular_inputs_and_labels 已经处理了
+            # 这里的 coordinates 已经是从 prepare_molecular_inputs_and_labels 传来的加噪后的坐标
+            # 因此，不再需要在此处重新计算 timesteps, noise, alpha_bar_t, noisy_coordinates
+            # 直接使用传入的 coordinates 参数作为模型的输入
             predicted_coordinates, predicted_atom_type_logits = self.forward(
                 selfies_input_ids=selfies_input_ids,
                 selfies_attention_mask=selfies_attention_mask,
