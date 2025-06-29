@@ -151,20 +151,30 @@ def main():
 
     tokenizer = AutoTokenizer.from_pretrained(config.model.mmada.tokenizer_path, padding_side="left")
 
-    # --- 修正模型配置和模型加载 ---
-    # 1. 首先加载 LLM 的原始配置
-    base_llm_config = AutoConfig.from_pretrained(config.model.mmada.pretrained_model_path)
+    new_selfies_tokens = list(selfies.get_semantic_robust_alphabet())
+    num_added_toks = tokenizer.add_tokens(new_selfies_tokens)
+    logger.info(f"Added {num_added_toks} new SELFIES tokens to tokenizer vocabulary.")
+
+    # 1. 首先加载基础的 LLM 模型 (LLaDA-8B-Instruct)
+    # 这一步会确保正确的 LLaDAConfig 和 LLaDAModelLM 类被加载到内存中
+    base_llm_model = AutoModelForCausalLM.from_pretrained(
+        config.model.mmada.pretrained_model_path,
+        torch_dtype=torch.bfloat16, 
+        trust_remote_code=True # 信任远程代码，以便正确加载 LLaDA 的自定义模块
+    )
     
-    # 2. 将原始 LLM 配置的参数转换为字典
-    mmada_model_config_kwargs = base_llm_config.to_dict()
+    # 2. 从加载的基础 LLM 模型中获取其配置
+    base_llm_config = base_llm_model.config # 这是 transformers_modules 提供的 LLaDAConfig 实例
     
-    # 3. 合并我们自定义的分子参数 (来自 config.yaml 的 model.mmada 部分)
-    # 确保 config.model.mmada 中的所有参数都被正确传递给 MMadaConfig
+    # 3. 将原始 LLM 配置的参数转换为字典
+    mmada_model_config_kwargs = base_llm_config.to_dict() # 以 base_llm_config 的参数为基础
+    
+    # 4. 合并我们自定义的分子参数 (来自 config.yaml 的 model.mmada 部分)
     mmada_model_config_kwargs.update({
         "llm_vocab_size": config.model.mmada.llm_vocab_size,
-        "llm_model_path": config.model.mmada.tokenizer_path, # 或者 config.model.mmada.pretrained_model_path
+        "llm_model_path": config.model.mmada.tokenizer_path, # 
         "num_new_special_tokens": config.model.mmada.num_new_special_tokens,
-        "gradient_checkpointing": config.model.mmada.gradient_checkpointing, # 从 mmada 配置获取
+        "gradient_checkpointing": config.model.mmada.gradient_checkpointing, 
         # 你的自定义分子参数
         "mol_atom_embedding_dim": config.model.mmada.mol_atom_embedding_dim,
         "mol_coord_embedding_dim": config.model.mmada.mol_coord_embedding_dim,
@@ -172,7 +182,7 @@ def main():
         "fusion_hidden_dim": config.model.mmada.fusion_hidden_dim,
         "final_condition_dim": config.model.mmada.final_condition_dim,
         "num_atom_types": config.model.mmada.num_atom_types,
-        "max_atoms": config.max_atoms, # 从顶层 config 获取
+        "max_atoms": config.max_atoms, 
         "output_atom_coords_dim": config.model.mmada.output_atom_coords_dim,
         "output_atom_type_dim": config.model.mmada.output_atom_type_dim,
         "diffusion_timesteps": config.model.mmada.diffusion_timesteps,
@@ -180,39 +190,18 @@ def main():
         "noise_schedule_beta_end": config.model.mmada.noise_schedule_beta_end,
     })
     
-    # 4. 实例化一个完整的 MMadaConfig 对象
+    # 5. 实例化一个完整的 MMadaConfig 对象
+    # 这个 mmada_config 现在包含了所有基础LLM参数和我们的自定义参数
     mmada_config = MMadaConfig(**mmada_model_config_kwargs)
 
-    # 5. 使用这个完整的 mmada_config 实例化 MMadaModelLM
-    # MMadaModelLM 的 __init__ 方法会使用这个 config
-    model = MMadaModelLM(mmada_config, torch_dtype=torch.bfloat16)
+    # 6. 使用这个完整的 mmada_config 实例化 MMadaModelLM
+    # MMadaModelLM 的 __init__ 方法会使用这个 config 来设置其所有层
+    model = MMadaModelLM(mmada_config, base_llm_model)
 
-    # 6. 从预训练路径加载模型的权重（只加载 LLM 部分的权重）
-    # 这里我们只加载原始 LLM (LLaDA) 的权重到 MMadaModelLM 内部的 LLaDAModelLM 部分
-    # MMadaModelLM 继承自 LLaDAModelLM，所以可以直接加载权重
-    state_dict = AutoModelForCausalLM.from_pretrained(config.model.mmada.pretrained_model_path, torch_dtype=torch.bfloat16).state_dict()
-    
-    # 将 state_dict 加载到我们新实例化的模型中
-    # 注意：如果 MMadaModelLM 增加了新的层，load_state_dict 可能会因为 key 不匹配而报错
-    # 此时需要 strict=False 或手动处理缺失/不匹配的 key
-    model.load_state_dict(state_dict, strict=False) # strict=False 允许加载部分匹配的权重
-    
-    logger.info(f"Loaded pretrained LLM weights from {config.model.mmada.pretrained_model_path}")
+    del base_llm_model
+    torch.cuda.empty_cache()
 
-    # --- 扩展 Tokenizer 词汇表以包含 SELFIES 符号 ---
-    # get_semantic_robust_alphabet 提供了语义健壮的 SELFIES 符号
-    new_selfies_tokens = list(selfies.get_semantic_robust_alphabet())
-    num_added_toks = tokenizer.add_tokens(new_selfies_tokens)
-    logger.info(f"Added {num_added_toks} new SELFIES tokens to tokenizer vocabulary.")
-
-    # ... (加载模型和处理模型并行化的代码)
-    model = MMadaModelLM.from_pretrained(config.model.mmada.pretrained_model_path, torch_dtype=torch.bfloat16)
-
-    # --- resize_token_embeddings (如果需要) ---
-    # 如果LLM的embedding层大小与tokenizer的词汇表大小不匹配，需要调整
-    if len(tokenizer) > model.config.vocab_size: # 检查新词汇表是否比模型原有的大
-        model.resize_token_embeddings(len(tokenizer))
-        logger.info(f"Resized model embeddings to new vocabulary size: {len(tokenizer)}")
+    logger.info(f"Loaded pretrained LLM weights into MMadaModelLM from {config.model.mmada.pretrained_model_path}")
 
     uni_prompting = UniversalPrompting(tokenizer, max_text_len=config.dataset.preprocessing.max_seq_length,
                                        special_tokens=(
@@ -361,7 +350,7 @@ def main():
         model, optimizer, train_dataloader, lr_scheduler
     )
 
-    mask_dtype = model.get_input_embeddings().weight.dtype
+    mask_dtype = model.llm_backbone.get_input_embeddings().weight.dtype
 
     ##################################
     #             Training          #
@@ -397,12 +386,7 @@ def main():
         rdmol2selfies = batch.get("rdmol2selfies", None)
         if rdmol2selfies is not None: rdmol2selfies = rdmol2selfies.to(accelerator_device)
 
-        # 对于 Labels，这里只是一个占位符。
-        # 实际的 labels 需要根据你的任务来定义。
-        # 如果是自回归生成 3D，labels 可能是目标 3D token 序列。
-        # 如果是类似 denoising 的任务，labels 可能与 input_ids 相似。
-        # 暂时用 input_ids 作为一个默认的 placeholder label，但你需要根据 MMadaModelLM.forward_process 的期望来调整
-        labels = text_input_ids.clone() # 这是一个简单的占位符，你需要根据你的损失函数和模型输出来定义真实的 labels
+        labels = coordinates.clone()
 
         return (
             selfies_input_ids, selfies_attention_mask,

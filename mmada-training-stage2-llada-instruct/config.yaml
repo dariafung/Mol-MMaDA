@@ -1,7 +1,7 @@
 wandb:
   entity: null
   resume: auto
-  run_id: x17cu0ld
+  run_id: r496dium
 experiment:
   project: mmada-training-stage2
   name: mmada-training-stage2-llada-instruct
@@ -9,7 +9,7 @@ experiment:
   max_train_examples_molecular: 1000
   save_every: 10000
   eval_every: 2500
-  log_every: 50
+  log_every: 1
   log_grad_norm_every: 100
   resume_from_checkpoint: latest
   logging_dir: mmada-training-stage2-llada-instruct/logs

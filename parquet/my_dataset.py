@@ -194,7 +194,7 @@ class MolecularUnifiedDataset(IterableDataset):
                         
                         # Padding 3D 数据到 max_atoms
                         # atom_vec
-                        padded_atom_vec = torch.full((self.max_atoms,), self.tokenizer.pad_token_id, dtype=torch.long)
+                        padded_atom_vec = torch.full((self.max_atoms,), 0, dtype=torch.long) 
                         padded_atom_vec[:num_atoms] = atom_vec
                         
                         # coordinates
