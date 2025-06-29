@@ -21,7 +21,7 @@ import math
 import shutil
 import time
 from pathlib import Path
-from typing import Union
+from typing import Union, Optional, Dict, Any, Callable
 
 import numpy as np
 # from PIL import Image

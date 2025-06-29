@@ -32,12 +32,13 @@ from transformers.models.auto import AutoModel, AutoConfig, AutoModelForCausalLM
 from transformers.cache_utils import Cache
 
 
-from .modeling_llada import LLaDAModelLM # <-- 仍然需要导入 LLaDAModelLM
+from .modeling_llada import LLaDAModelLM 
 
 from .sampling import cosine_schedule 
 from transformers import PretrainedConfig
 
-# --- 新增 3D 分子编码器 ---
+from .common_modules import MLP
+
 class Molecular3DEncoder(nn.Module):
     def __init__(self, config: "MMadaConfig"): 
         super().__init__()
@@ -67,16 +68,12 @@ class Molecular3DEncoder(nn.Module):
 
 
 class MMadaConfig(PretrainedConfig):
-    # MMadaConfig 不再需要复制 LLaDAConfig 的参数，因为 MMadaModelLM 不再直接继承 LLaDAModelLM。
-    # MMadaConfig 只包含我们自定义的分子相关参数。
     model_type = "mmada"
 
     def __init__(self, **kwargs):
         super().__init__(**kwargs)
         
         allowed_keys = [
-            # 这些 LLM 参数现在会从 LLM 模型的 config 中获取，然后由 MMadaModelLM 内部使用
-            # 但为了在 MMadaConfig 中也能访问，可以保留在 kwargs 中。
             "d_model", 
             "vocab_size", 
             "llm_vocab_size", # LLM 的原始词汇表大小
@@ -101,6 +98,12 @@ class MMadaConfig(PretrainedConfig):
             "diffusion_timesteps", 
             "noise_schedule_beta_start", 
             "noise_schedule_beta_end",
+
+            "coords_coeff",
+            "atom_type_coeff",
+            "alignment_coeff",
+            "selfies_coeff",
+            "hierarchical_coeff",
         ]
 
         for key in allowed_keys:
@@ -108,46 +111,37 @@ class MMadaConfig(PretrainedConfig):
                 setattr(self, key, kwargs[key])
 
 
-class MMadaModelLM(nn.Module): # <-- 现在继承自 nn.Module
-    # 不再需要 config_class 和 base_model_prefix，因为不再直接是 PreTrainedModel
-    # config_class = MMadaConfig 
-    # base_model_prefix = "model" 
+class MMadaModelLM(nn.Module): 
 
     def __init__(self, config: "MMadaConfig", base_llm_model: LLaDAModelLM, *args, **kwargs): # <-- 接收 base_llm_model
         print(f"Initializing MMadaModelLM with config: {config}")
-        super().__init__() # 初始化 nn.Module 的父类
+        super().__init__()
         
-        self.config = config # 保存配置
-        self.llm_backbone = base_llm_model # <-- 将基础 LLM 模型作为子模块
+        self.config = config 
+        self.llm_backbone = base_llm_model 
 
-        # --- 新增 3D 分子编码器 ---
         self.molecular_3d_encoder = Molecular3DEncoder(config)
 
-        # --- 多模态融合层 ---
-        # 融合层的输入维度：LLM_d_model (text/selfies) + mol_3d_encoder_output_dim
         fusion_input_dim = config.d_model * 2 + config.mol_3d_encoder_output_dim 
         
-        self.multimodal_fusion_mlp = nn.Sequential(
-            nn.Linear(fusion_input_dim, config.fusion_hidden_dim),
-            nn.GELU(),
-            nn.Linear(config.fusion_hidden_dim, config.final_condition_dim) 
+        self.multimodal_fusion_mlp = MLP( # 确保 MLP 已导入
+            input_dim=fusion_input_dim,
+            hidden_dim=config.fusion_hidden_dim,
+            output_dim=config.final_condition_dim,
+            num_layers=2 # 假设有两层，根据config 调整
         )
         
-        # --- 将融合后的条件嵌入投影到 LLM 隐藏维度，以便作为 LLM 输入 ---
         self.condition_to_llm_projection = nn.Linear(config.final_condition_dim, config.d_model)
         
-        # --- 预测头：作用于 LLM 输出的隐藏状态 ---
-        # 这里的输入是 LLM 的隐藏状态维度 (config.d_model)
-        # 输出是扁平化的 max_atoms * 单个原子预测维度
         self.atom_type_prediction_head = nn.Linear(config.d_model, config.max_atoms * config.num_atom_types)
         self.coordinates_prediction_head = nn.Linear(config.d_model, config.max_atoms * config.output_atom_coords_dim)
         
-        # 为扩散过程定义噪声调度 (beta 值)
         self.betas = torch.linspace(config.noise_schedule_beta_start, config.noise_schedule_beta_end, config.diffusion_timesteps)
         self.alphas = 1.0 - self.betas
-        self.alpha_bars = torch.cumprod(self.alphas, dim=0) 
+        self.alpha_bars = torch.cumprod(self.alphas, dim=0)
         self.sqrt_alpha_bars = torch.sqrt(self.alpha_bars)
         self.sqrt_one_minus_alpha_bars = torch.sqrt(1.0 - self.alpha_bars)
+        self.mask_token_id = config.mask_token_id
 
 
     def forward(
@@ -156,16 +150,16 @@ class MMadaModelLM(nn.Module): # <-- 现在继承自 nn.Module
         selfies_attention_mask: torch.LongTensor,
         text_input_ids: torch.LongTensor,
         text_attention_mask: torch.LongTensor,
-        atom_vec: torch.LongTensor, # 真实的原子类型
-        coordinates: torch.FloatTensor, # 真实的 3D 坐标 (这里接收的是要加噪/预测的坐标)
+        atom_vec: torch.LongTensor, 
+        coordinates: torch.FloatTensor, 
         atoms_mask: torch.BoolTensor,
         edge_type: Optional[torch.LongTensor] = None, 
         bond_type: Optional[torch.LongTensor] = None,
         dist: Optional[torch.FloatTensor] = None,
         rdmol2selfies: Optional[torch.FloatTensor] = None,
-        timesteps: Optional[torch.LongTensor] = None, # 扩散时间步
+        timesteps: Optional[torch.LongTensor] = None, 
         **kwargs, 
-    ) -> Tuple[torch.Tensor, torch.Tensor]: # 返回预测坐标和原子类型 logits
+    ) -> Tuple[torch.Tensor, torch.Tensor]: 
         """
         MMadaModelLM 的主要前向传播方法。
         接收多模态输入，融合后通过 LLM 主干，并预测 3D 结构。
@@ -281,72 +275,79 @@ class MMadaModelLM(nn.Module): # <-- 现在继承自 nn.Module
         atom_vec: torch.LongTensor, # 真实的原子类型
         coordinates: torch.FloatTensor, # 真实的 3D 坐标
         atoms_mask: torch.BoolTensor,
+        task_type: str,
+        true_coordinates: torch.FloatTensor, 
+        true_atom_vec: torch.LongTensor,
+        mask_schedule_coords: Callable,
+
         edge_type: Optional[torch.LongTensor] = None, 
         bond_type: Optional[torch.LongTensor] = None,
         dist: Optional[torch.FloatTensor] = None,
         rdmol2selfies: Optional[torch.FloatTensor] = None,
-        labels: Optional[torch.FloatTensor] = None, # 这里的 labels 接收的是真实坐标
-        **kwargs, 
+        timesteps: Optional[torch.LongTensor] = None,
     ):
         batch_size = coordinates.shape[0]
+
+        losses = {}
         
-        timesteps = torch.randint(0, self.config.diffusion_timesteps, (batch_size,), device=coordinates.device).long()
-        
-        noise = torch.randn_like(coordinates)
-        alpha_bar_t = self.get_alpha_bar(timesteps) 
-        
-        sqrt_alpha_bar_t = alpha_bar_t.sqrt().unsqueeze(-1).unsqueeze(-1) 
-        sqrt_one_minus_alpha_bar_t = (1.0 - alpha_bar_t).sqrt().unsqueeze(-1).unsqueeze(-1)
-        
-        noisy_coordinates = sqrt_alpha_bar_t * coordinates + \
-                            sqrt_one_minus_alpha_bar_t * noise
-        
-        # 调用 MMadaModelLM 的主要前向方法 (self.forward)
-        predicted_coordinates, predicted_atom_type_logits = self.forward(
-            selfies_input_ids=selfies_input_ids,
-            selfies_attention_mask=selfies_attention_mask,
-            text_input_ids=text_input_ids,
-            text_attention_mask=text_attention_mask,
-            atom_vec=atom_vec, 
-            coordinates=noisy_coordinates, # 传入噪声化的坐标
-            atoms_mask=atoms_mask,
-            edge_type=edge_type, 
-            bond_type=bond_type, 
-            dist=dist,           
-            rdmol2selfies=rdmol2selfies,
-            timesteps=timesteps, 
-        )
+        # ------------------------------------------------------------------------
+        # 1D (SELFIES/Text) to 3D Generation Task (去噪坐标 & 原子类型)
+        # 明确只处理 '1d_to_3d' 任务
+        if task_type == '1d_to_3d':
+            # 直接调用 self.forward，传入加噪后的 coordinates 作为 3D 编码器输入
+            # 注意：这里不再对 coordinates 加噪，因为 prepare_molecular_inputs_and_labels 已经处理了
+            predicted_coordinates, predicted_atom_type_logits = self.forward(
+                selfies_input_ids=selfies_input_ids,
+                selfies_attention_mask=selfies_attention_mask,
+                text_input_ids=text_input_ids,
+                text_attention_mask=text_attention_mask,
+                atom_vec=atom_vec, # 传入 atom_vec
+                coordinates=coordinates, # <-- 传入已经噪声化后的坐标 (来自 prepare_molecular_inputs_and_labels)
+                atoms_mask=atoms_mask,
+                # timesteps 参数不需要传入 forward
+            )
 
-        # --- 损失计算 ---
-        true_coordinates = labels 
-        true_atom_vec = atom_vec 
+            # --- 损失计算 ---
+            # 1. 坐标预测损失 (MSE Loss)
+            coords_loss = F.mse_loss(
+                predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
+                true_coordinates * atoms_mask.unsqueeze(-1).float(), # 目标是真实（干净）坐标
+                reduction='sum'
+            ) / (atoms_mask.sum().float() + 1e-5)
+            losses['coords_loss'] = coords_loss
 
-        print(f"DEBUG: predicted_coordinates shape: {predicted_coordinates.shape}")
-        print(f"DEBUG: true_coordinates shape: {true_coordinates.shape}")
-        print(f"DEBUG: atoms_mask shape: {atoms_mask.shape}")
-        print(f"DEBUG: atoms_mask.unsqueeze(-1).float() shape: {atoms_mask.unsqueeze(-1).float().shape}")
+            # 2. 原子类型预测损失 (Cross-Entropy Loss)
+            atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
+            true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1) # 使用传入的 true_atom_vec 作为目标
 
-        # 1. 坐标预测损失 (MSE Loss)
-        coords_loss = F.mse_loss(
-            predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
-            true_coordinates * atoms_mask.unsqueeze(-1).float(),
-            reduction='sum'
-        ) / (atoms_mask.sum().float() + 1e-5) 
+            atom_type_loss = F.cross_entropy(
+                atom_type_logits_flat,
+                true_atom_vec_flat,
+                ignore_index=0, # 假设原子 ID 0 是填充/未知原子，不参与损失计算
+                reduction='mean'
+            )
+            losses['atom_type_loss'] = atom_type_loss
+            
+            # --- 对齐损失 (可选，推荐) ---
+            # 为了计算对齐损失，forward 方法需要返回 selfies_context_embeds 和 mol_3d_embeds
+            # 如果你在 forward 方法的返回类型中添加了这些，并且 return_dict=True，
+            # 可以在这里通过 model_outputs["selfies_context_embeds"] 等获取并计算损失。
+            # 这里为了简化，暂时不在此处添加对齐损失的计算，专注于核心功能。
+            # 如果未来需要，可以修改 forward 的返回类型为 dict，并在其中包含这些嵌入。
 
-        # 2. 原子类型预测损失 (Cross-Entropy Loss)
-        atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
-        true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1)
+        # ------------------------------------------------------------------------
+        # 结合所有损失，并应用系数
+        total_loss = torch.tensor(0.0, device=coordinates.device)
+        if not losses: # 如果没有任何损失被计算，说明 task_type 不匹配
+            raise ValueError(f"No loss calculated for task_type: {task_type}. Check your task_type logic and data.")
 
-        atom_type_loss = F.cross_entropy(
-            atom_type_logits_flat,
-            true_atom_vec_flat,
-            ignore_index=0, # 假设原子 ID 0 是未知/填充原子，不参与损失计算
-            reduction='mean'
-        )
+        for loss_name, loss_value in losses.items():
+            # 从 config 中获取系数 (您需要在 config.yaml 和 MMadaConfig 中添加这些系数)
+            # 例如 config.coords_coeff, config.atom_type_coeff, config.alignment_coeff
+            coeff = getattr(self.config, loss_name.replace('_loss', '_coeff'), 1.0)
+            total_loss += coeff * loss_value
 
-        loss = coords_loss + atom_type_loss 
-
-        return loss
+        return total_loss, losses # 返回总损失和各项损失的字典以供日志记录
 
 AutoConfig.register("mmada", MMadaConfig)
 AutoModelForCausalLM.register(MMadaConfig, MMadaModelLM)

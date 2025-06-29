@@ -1,7 +1,7 @@
 wandb:
   entity: null
   resume: auto
-  run_id: r496dium
+  run_id: ge82883w
 experiment:
   project: mmada-training-stage2
   name: mmada-training-stage2-llada-instruct
