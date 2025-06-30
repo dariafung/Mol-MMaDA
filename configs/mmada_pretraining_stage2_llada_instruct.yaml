@@ -8,17 +8,12 @@ experiment:
     project: "mmada-training-stage2"
     name: "mmada-training-stage2-llada-instruct"
     output_dir: "mmada-training-stage2-llada-instruct"
-    # max_train_examples_t2i: 40000000
-    # max_train_examples_mmu: 40000000
     max_train_examples_molecular: 1000
     save_every: 10000
     eval_every: 2500
-    # generate_every: 1000
     log_every: 1
     log_grad_norm_every: 100
     resume_from_checkpoint: "latest"
-    # val_every: 50
-    # max_val_examples_t2i: 2000
 
 model:
         dataset_type: molecular 
