@@ -19,15 +19,6 @@ class MMadaConfig(PretrainedConfig):
         llm_config_path: str = "llada-8b-instruct",
         llm_model_name_or_path: str = None,
 
-        # Image tokenizer config
-        image_tokenizer_path: str = "magvit-v2-tokenizer",
-        image_tokenizer_config_file: str = None,
-        image_tokenizer_model_file: str = None,
-
-        # Image diffusion
-        image_unet_config_path: str = "show-o-image-unet",
-        image_unet_model_path: str = None,
-
         # Molecular 3D Encoder
         mol_atom_embedding_dim: int = 128,
         mol_coord_embedding_dim: int = 128,
@@ -66,11 +57,6 @@ class MMadaConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.llm_config_path = llm_config_path
         self.llm_model_name_or_path = llm_model_name_or_path
-        self.image_tokenizer_path = image_tokenizer_path
-        self.image_tokenizer_config_file = image_tokenizer_config_file
-        self.image_tokenizer_model_file = image_tokenizer_model_file
-        self.image_unet_config_path = image_unet_config_path
-        self.image_unet_model_path = image_unet_model_path
 
         self.mol_atom_embedding_dim = mol_atom_embedding_dim
         self.mol_coord_embedding_dim = mol_coord_embedding_dim

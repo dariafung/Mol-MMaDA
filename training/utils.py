@@ -9,52 +9,117 @@ from typing import Any, List, Tuple, Union, Optional
 import argparse
 import sys 
 
-def get_mask_schedule(name: str, start: float, end: float, timesteps: int):
-    """
-    Returns a masking schedule function based on the given name and parameters.
-    This schedule maps a float timestep (0 to 1) to a masking probability.
-    """
-    betas = None
-    if name == "linear":
-        betas = torch.linspace(start, end, timesteps, dtype=torch.float64)
-    elif name == "cosine":
-        s = 0.008
-        x = torch.linspace(0, timesteps, timesteps + 1, dtype=torch.float64)
-        alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
-        alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
-        betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-        betas = betas.clamp(max=0.999) # Clamp to avoid issues
+def get_mask_schedule(schedule_name: str, timesteps: int, start: float, end: float, x=None):
+    if schedule_name == "linear":
+        return torch.linspace(start, end, timesteps, dtype=torch.float32)
+    elif schedule_name == "cosine":
+        if x is None: # If not providing a specific timestep, return the full schedule
+            t = torch.arange(timesteps, dtype=torch.float32)
+        else: # For a specific timestep 'x'
+            t = x.float() # Ensure t is float for calculation
 
+        f_t = torch.cos(((t / timesteps) + 0.008) / 1.008 * (math.pi / 2)) ** 2
+        alphas_bar = f_t / f_t[0]
+        # For masking, we often want the opposite: low mask at t=0, high mask at t=timesteps
+        # So we might use 1 - alphas_bar for mask ratio, or a custom function.
+        # Let's define it such that it gives mask ratio directly
+        
+        # Example for mask ratio: starts low, increases
+        # Using 1 - sqrt(alphas_bar) can be a simple way to get a masking schedule
+        mask_ratio_schedule = 1.0 - torch.sqrt(alphas_bar)
+        
+        # Scale to start and end
+        scaled_mask_ratio = start + (end - start) * mask_ratio_schedule
+        return scaled_mask_ratio.clamp(0.0, 1.0) # Ensure it's between 0 and 1
     else:
-        raise NotImplementedError(f"Mask schedule '{name}' not supported.")
+        raise ValueError(f"Unknown schedule name: {schedule_name}")
 
-    alphas = 1.0 - betas
-    alphas_cumprod = torch.cumprod(alphas, dim=0)
-
-    # Return a function that maps a float timestep (0 to 1) to a mask probability
-    # For a mask schedule, we often want the probability of being masked at a given "noise level" or timestep.
-    # This might be directly related to 1 - sqrt(alpha_bar_t) for noise, or a linear/cosine interpolation.
+def apply_selfies_masking(
+    original_selfies_ids: torch.LongTensor,
+    mask_token_id: int,
+    timestep: int, # 当前的扩散步长
+    total_diffusion_timesteps: int, # 总的扩散步长，来自 MMadaConfig.diffusion_timesteps
+    mask_schedule_name: str, # 例如 "linear", "cosine"
+    mask_schedule_start: float, # 例如 0.0001
+    mask_schedule_end: float, # 例如 0.02
+    device: torch.device,
+) -> Tuple[torch.LongTensor, torch.LongTensor]:
+    """
+    根据扩散步长对 SELFIES token 进行 masking。
     
-    # Let's create a callable that takes a float t (0 to 1) and returns a mask ratio.
-    # We will interpolate the alphas_cumprod values for given t.
-    sqrt_alphas_cumprod = torch.sqrt(alphas_cumprod)
-    sqrt_one_minus_alphas_cumprod = torch.sqrt(1.0 - alphas_cumprod)
+    Args:
+        original_selfies_ids: 原始的 SELFIES token ID 序列 (batch_size, seq_len)。
+        mask_token_id: SELFIES tokenizer 的 [MASK] token ID。
+        timestep: 当前的扩散步长 (0 到 total_diffusion_timesteps - 1)。
+        total_diffusion_timesteps: 总的扩散步长。
+        mask_schedule_name: mask 比例的调度名称。
+        mask_schedule_start: mask 调度起始值。
+        mask_schedule_end: mask 调度结束值。
+        device: tensor 所在的设备。
 
-    def schedule_fn(t_float: torch.Tensor) -> torch.Tensor:
-        # t_float is expected to be a tensor of floats between 0 and 1.
-        # Scale t_float to be an index in [0, timesteps-1]
-        t_indices = (t_float * (timesteps - 1)).long().clamp(0, timesteps - 1)
-        
-        # The mask probability can be defined in various ways.
-        # A common approach for discrete diffusion masking is related to the noise schedule.
-        # For example, the probability of a token being replaced by MASK or randomized.
-        
-        # Here, let's return 1 - sqrt_alphas_cumprod as a proxy for masking probability,
-        # which is akin to the noise level for continuous diffusion.
-        # This means, as t increases, more masking.
-        return sqrt_one_minus_alphas_cumprod[t_indices]
+    Returns:
+        masked_selfies_ids: 经过 masking 的 SELFIES token ID 序列。
+        true_selfies_labels: 原始的 SELFIES token ID 序列 (作为ground truth)。
+                              未被 mask 的位置通常用 -100 标记，以便在计算交叉熵时忽略。
+    """
+    batch_size, seq_len = original_selfies_ids.shape
+    
+    # 1. 获取当前 timestep 对应的 masking 概率
 
-    return schedule_fn
+    
+    # 映射 timestep 到 [0, 1] 范围，用于 schedule 计算
+    normalized_timestep = timestep / (total_diffusion_timesteps - 1)
+    
+    # 模拟 get_mask_schedule 对单个 timestep 的行为
+    if mask_schedule_name == "linear":
+        mask_ratio = mask_schedule_start + (mask_schedule_end - mask_schedule_start) * normalized_timestep
+    elif mask_schedule_name == "cosine":
+        # 简化版：从 0 到 1 的归一化时间 t
+        t_normalized = (timestep.float() + 1e-5) / total_diffusion_timesteps # Avoid division by zero
+        # 假设一个从低到高变化的mask比例
+        mask_ratio = mask_schedule_start + (mask_schedule_end - mask_schedule_start) * (1 - torch.cos(t_normalized * math.pi)) / 2
+    else:
+        # Fallback for other schedules or default to a fixed ratio
+        mask_ratio = mask_schedule_start # Or a fixed self.config.mask_replace_ratio
+
+    mask_ratio = torch.clamp(mask_ratio, 0.0, 1.0).item() # 确保在 [0, 1] 之间并转为标量
+
+
+    # 2. 生成 mask
+    masked_selfies_ids = original_selfies_ids.clone()
+    true_selfies_labels = original_selfies_ids.clone() # 初始时，标签就是原始序列
+    
+    for i in range(batch_size):
+        seq_len_i = (original_selfies_ids[i] != 0).sum().item() # 假设 0 是 padding token
+        if seq_len_i == 0:
+            continue
+            
+        num_mask_tokens = int(seq_len_i * mask_ratio)
+        
+        # 可mask的 token 索引
+        non_special_token_indices = (original_selfies_ids[i] != 0).nonzero(as_tuple=True)[0]
+        
+        if len(non_special_token_indices) == 0:
+            continue
+
+        # 随机选择要 mask 的 token 索引
+        mask_indices = random.sample(
+            non_special_token_indices.tolist(), 
+            min(num_mask_tokens, len(non_special_token_indices))
+        )
+        
+        # 对选定的索引进行 mask
+        masked_selfies_ids[i, mask_indices] = mask_token_id
+        
+        # 对于未被 mask 的 token，在 true_selfies_labels 中设置为 -100，以便在交叉熵计算时忽略
+        unmasked_indices = list(set(non_special_token_indices.tolist()) - set(mask_indices))
+        true_selfies_labels[i, unmasked_indices] = -100
+        
+        # 如果有 padding token，也设置为 -100
+        padding_indices = (original_selfies_ids[i] == 0).nonzero(as_tuple=True)[0]
+        true_selfies_labels[i, padding_indices] = -100
+
+    return masked_selfies_ids.to(device), true_selfies_labels.to(device)
 
 def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps: int):
     """
