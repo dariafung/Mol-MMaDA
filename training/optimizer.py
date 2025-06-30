@@ -15,6 +15,7 @@
 """PyTorch implementation of the Lion optimizer."""
 import torch
 from torch.optim.optimizer import Optimizer
+import torch.optim as optim 
 
 
 class Lion(Optimizer):
@@ -79,3 +80,39 @@ class Lion(Optimizer):
                 exp_avg.mul_(beta2).add_(grad, alpha=1 - beta2)
 
         return loss
+    
+def get_optimizer(model: torch.nn.Module, learning_rate: float, weight_decay: float, name: str = "adamw", **kwargs):
+  """
+  Returns an optimizer instance based on the provided name and parameters.
+
+  Args:
+      model (torch.nn.Module): The model to optimize.
+      learning_rate (float): The learning rate.
+      weight_decay (float): The weight decay coefficient.
+      name (str): The name of the optimizer ("adamw" or "lion").
+      **kwargs: Additional parameters for the optimizer.
+  """
+  optimizer_name = name.lower()
+
+  # Filter out parameters that require gradients
+  params_to_optimize = [p for p in model.parameters() if p.requires_grad]
+
+  if optimizer_name == "adamw":
+      # Default AdamW optimizer from PyTorch
+      return optim.AdamW(
+          params_to_optimize,
+          lr=learning_rate,
+          weight_decay=weight_decay,
+          **kwargs
+      )
+  elif optimizer_name == "lion":
+      # Your custom Lion optimizer
+      return Lion(
+          params_to_optimize,
+          lr=learning_rate,
+          betas=(kwargs.get("beta1", 0.9), kwargs.get("beta2", 0.99)), # Lion's betas
+          weight_decay=weight_decay,
+          **kwargs
+      )
+  else:
+      raise ValueError(f"Optimizer '{name}' not supported. Choose 'adamw' or 'lion'.")

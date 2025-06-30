@@ -3,7 +3,7 @@ Modified from https://github.com/CompVis/taming-transformers/blob/master/taming/
 """
 
 import math
-from typing import Tuple, Union
+from typing import Tuple, Union, Optional
 
 import numpy as np
 import torch
@@ -355,3 +355,77 @@ class ResnetBlock(nn.Module):
                 x = self.nin_shortcut(x)
 
         return x + h
+
+
+class MLP(nn.Module):
+    def __init__(self, input_dim: int, hidden_dim: int, output_dim: int, num_layers: int):
+        super().__init__()
+        self.num_layers = num_layers
+        self.layers = nn.ModuleList()
+
+        if num_layers < 1:
+            raise ValueError("num_layers for MLP must be at least 1.")
+
+        if num_layers == 1:
+            # 如果只有一层，直接从 input_dim 到 output_dim
+            self.layers.append(nn.Linear(input_dim, output_dim))
+        else:
+            # 第一层：从 input_dim 到 hidden_dim
+            self.layers.append(nn.Linear(input_dim, hidden_dim))
+            self.layers.append(nn.ReLU()) # 或其他激活函数，如 nn.SiLU()
+
+            # 中间层：从 hidden_dim 到 hidden_dim
+            for _ in range(num_layers - 2): # 循环 num_layers - 2 次，处理中间层
+                self.layers.append(nn.Linear(hidden_dim, hidden_dim))
+                self.layers.append(nn.ReLU()) # 或其他激活函数
+
+            # 最后一层：从 hidden_dim 到 output_dim
+            self.layers.append(nn.Linear(hidden_dim, output_dim))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        for layer in self.layers:
+            x = layer(x)
+        return x
+
+class SinusoidalPositionalEmbedding(nn.Module):
+    def __init__(self, dim: int, min_freq: float = 1/90000.0, init_range: int = 1000):
+        super().__init__()
+        self.dim = dim
+        self.min_freq = min_freq
+        self.init_range = init_range # Max sequence length/max timestep that this embedding can cover
+        
+        # Create frequencies for sinusoidal embeddings
+        inv_freq = 1.0 / (self.min_freq ** (torch.arange(0, dim, 2).float() / dim))
+        self.register_buffer("inv_freq", inv_freq)
+
+    def forward(self, x: torch.Tensor, seq_len: Optional[int] = None) -> torch.Tensor:
+        """
+        x can be a tensor of positions (e.g., torch.arange) or another tensor
+        whose shape determines the sequence length.
+        """
+        if seq_len is None:
+            # Assume x is a sequence of positions like (batch_size, seq_len) or (seq_len,)
+            # If x is feature tensor (B, L, D), then seq_len = x.shape[1]
+            # For positional embeddings, x is often a 1D tensor of positions or (B, 1) of positions.
+            if x.dim() == 1:
+                positions = x.float() # Assume x is already positions
+            elif x.dim() == 2 and x.shape[1] == 1: # (B, 1) for a single position per batch
+                positions = x.float().squeeze(1)
+            else: # Assume x is a feature tensor (B, L, D) and we need positions up to L
+                positions = torch.arange(x.shape[1], device=x.device, dtype=torch.float)
+
+        else:
+            positions = torch.arange(seq_len, device=x.device, dtype=torch.float)
+
+        # Ensure positions are within the expected range for the embeddings
+        if positions.max() > self.init_range:
+            # You might want to handle this case, e.g., by logging a warning or adjusting init_range
+            pass
+
+        sinusoid_inp = torch.einsum("i,j->ij", positions, self.inv_freq)
+        pos_emb = torch.cat((sinusoid_inp.sin(), sinusoid_inp.cos()), dim=-1)
+        
+        if x.dim() == 3: # If input was (B, L, D), then expand pos_emb to (1, L, D) and broadcast
+            pos_emb = pos_emb.unsqueeze(0)
+
+        return pos_emb # This is the positional embedding to be added to features
