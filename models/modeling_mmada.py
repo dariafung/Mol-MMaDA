@@ -2,14 +2,14 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from transformers import PretrainedConfig
-from typing import Optional, Callable, Dict, Any
+from typing import Optional, Callable, Dict, Any, Tuple
 
 from .modeling_llada import LLaDAModelLM
 from .common_modules import MLP, SinusoidalPositionalEmbedding
 from training.utils import get_mask_schedule
 
 
-# --- 1. 修改 MMadaConfig 类 ---
+# --- 1. MMadaConfig 类 ---
 class MMadaConfig(PretrainedConfig):
     model_type = "mmada"
 
@@ -19,7 +19,7 @@ class MMadaConfig(PretrainedConfig):
         llm_config_path: str = "llada-8b-instruct",
         llm_model_name_or_path: str = None,
 
-        # Molecular 3D Encoder
+        # Molecular 3D Encoder (原有的 Molecular3DEncoder 参数)
         mol_atom_embedding_dim: int = 128,
         mol_coord_embedding_dim: int = 128,
         mol_3d_encoder_output_dim: int = 768, # Should match LLM hidden size or be projected
@@ -28,7 +28,7 @@ class MMadaConfig(PretrainedConfig):
         output_atom_coords_dim: int = 3, # x, y, z coordinates
         output_atom_type_dim: int = 120, # Number of atom types for classification
 
-        # Fusion network parameters
+        # Fusion network parameters (原有的融合网络参数)
         d_model: int = 768, # Typically LLM hidden size
         fusion_hidden_dim: int = 2048,
         final_condition_dim: int = 768,
@@ -41,9 +41,9 @@ class MMadaConfig(PretrainedConfig):
         # Loss coefficients for molecular and other tasks
         coords_coeff: float = 1.0,
         atom_type_coeff: float = 1.0,
-        selfies_coeff: float = 0.0,  # 新增：SELFIES预测损失系数
-        alignment_coeff: float = 0.0, # 新增：对齐损失系数
-        hierarchical_coeff: float = 0.0, # 新增：分层对齐损失系数 (暂时设为0，后续实现)
+        selfies_coeff: float = 0.0,  # SELFIES预测损失系数
+        alignment_coeff: float = 0.0, # 对齐损失系数
+        hierarchical_coeff: float = 0.0, # 分层对齐损失系数
 
         # Masking parameters for discrete diffusion
         mask_token_id: int = -1, # To be set by tokenizer vocab size + 1
@@ -57,6 +57,13 @@ class MMadaConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.llm_config_path = llm_config_path
         self.llm_model_name_or_path = llm_model_name_or_path
+        
+        # 移除图像相关参数的赋值
+        # self.image_tokenizer_path = image_tokenizer_path
+        # self.image_tokenizer_config_file = image_tokenizer_config_file
+        # self.image_tokenizer_model_file = image_tokenizer_model_file
+        # self.image_unet_config_path = image_unet_config_path
+        # self.image_unet_model_path = image_unet_model_path
 
         self.mol_atom_embedding_dim = mol_atom_embedding_dim
         self.mol_coord_embedding_dim = mol_coord_embedding_dim
@@ -76,9 +83,9 @@ class MMadaConfig(PretrainedConfig):
 
         self.coords_coeff = coords_coeff
         self.atom_type_coeff = atom_type_coeff
-        self.selfies_coeff = selfies_coeff      # 新增
-        self.alignment_coeff = alignment_coeff  # 新增
-        self.hierarchical_coeff = hierarchical_coeff # 新增
+        self.selfies_coeff = selfies_coeff
+        self.alignment_coeff = alignment_coeff
+        self.hierarchical_coeff = hierarchical_coeff
 
         self.mask_token_id = mask_token_id
         self.mask_replace_ratio = mask_replace_ratio
@@ -87,7 +94,7 @@ class MMadaConfig(PretrainedConfig):
         self.mask_schedule_end = mask_schedule_end
 
 
-# --- 2. 修改 Molecular3DEncoder 类 (无需太大改动，确保输出维度匹配) ---
+# --- 2. Molecular3DEncoder 类 ---
 class Molecular3DEncoder(nn.Module):
     def __init__(self, config: MMadaConfig):
         super().__init__()
@@ -133,7 +140,7 @@ class Molecular3DEncoder(nn.Module):
         return molecular_embedding, per_atom_features # 返回per_atom_features用于潜在的分层对齐
 
 
-# --- 3. 修改 MMadaModelLM 类 ---
+# --- 3. MMadaModelLM 类 ---
 class MMadaModelLM(nn.Module):
     def __init__(self, config: MMadaConfig):
         super().__init__()
@@ -145,12 +152,11 @@ class MMadaModelLM(nn.Module):
         for param in self.llm_backbone.parameters():
             param.requires_grad = False
 
-        # Molecular 3D Encoder
+        # Molecular 3D Encoder (保留)
         self.molecular_3d_encoder = Molecular3DEncoder(config)
 
-        # Multimodal fusion MLP
+        # Multimodal fusion MLP (保留)
         # Input dim for fusion: LLM output dim (from selfies context) + Mol3D encoder output dim
-        # Assuming selfies context embed size is d_model
         fusion_input_dim = config.d_model + config.mol_3d_encoder_output_dim
         self.multimodal_fusion_mlp = MLP(
             input_dim=fusion_input_dim,
@@ -159,24 +165,17 @@ class MMadaModelLM(nn.Module):
             num_layers=2
         )
 
-        # Prediction heads for 3D molecular generation
+        # Prediction heads for 3D molecular generation (保留)
         self.coordinates_prediction_head = nn.Linear(config.final_condition_dim, config.output_atom_coords_dim)
         self.atom_type_prediction_head = nn.Linear(config.final_condition_dim, config.output_atom_type_dim)
 
-        # New: Projection layer for alignment loss if dimensions don't match
-        # Assuming selfies_context_embeds (LLM d_model) and mol_3d_embeds (mol_3d_encoder_output_dim)
-        # need to be projected to a common dimension for alignment. Let's project to d_model.
+        # New: Projection layer for alignment loss if dimensions don't match (保留)
         if config.mol_3d_encoder_output_dim != config.d_model:
             self.mol_embed_projection_for_alignment = nn.Linear(config.mol_3d_encoder_output_dim, config.d_model)
         else:
             self.mol_embed_projection_for_alignment = nn.Identity()
 
-        # New: SELFIES prediction head (if LLM's lm_head is not directly used for SELFIES)
-        # This is for the discrete diffusion loss on SELFIES tokens.
-        # Assuming the LLM's final hidden state before lm_head is used for prediction
-        # The vocab size should be for the SELFIES tokenizer.
-        # Here we'll re-use the LLM's lm_head for simplicity, assuming SELFIES tokens are part of LLM vocab.
-        # If SELFIES vocabulary is separate, you'd need a dedicated head.
+        # 旧的 SELFIES prediction head (如果 LLM 的 lm_head 不直接用于 SELFIES)
         # self.selfies_prediction_head = nn.Linear(config.d_model, config.selfies_vocab_size) # Example if separate vocab
 
 
@@ -190,13 +189,12 @@ class MMadaModelLM(nn.Module):
         text_input_ids: Optional[torch.LongTensor] = None, # Optional for 1d_to_3d
         text_attention_mask: Optional[torch.LongTensor] = None, # Optional for 1d_to_3d
         timesteps: Optional[torch.LongTensor] = None,
+        # 移除 image_input_ids 和 image_attention_mask
         **kwargs,
-    ):
+    ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         batch_size = selfies_input_ids.shape[0]
         
         # 1. Process SELFIES input using LLM backbone
-        # The LLM takes input_ids and attention_mask
-        # We need the hidden states to get the contextual embedding for SELFIES
         llm_selfies_output = self.llm_backbone(
             input_ids=selfies_input_ids,
             attention_mask=selfies_attention_mask,
@@ -213,34 +211,23 @@ class MMadaModelLM(nn.Module):
         # Shape: (batch_size, hidden_size)
 
 
-        # 2. Process 3D molecular input
+        # 2. Process 3D molecular input (保留 Molecular3DEncoder)
         mol_3d_embeds, per_atom_features = self.molecular_3d_encoder(atom_vec, coordinates, atoms_mask)
         # mol_3d_embeds shape: (batch_size, mol_3d_encoder_output_dim)
         # per_atom_features shape: (batch_size, max_atoms, mol_3d_encoder_output_dim)
 
 
-        # 3. Handle optional text input (if not a pure 1D-to-3D task)
-        # For '1d_to_3d' task, text_input_ids might be None or dummy.
-        # If it's a general multimodal setup, you'd concatenate or fuse text_context_embeds too.
-        # For simplicity in 1d_to_3d, we assume text is not the primary condition or is empty.
-        # If text is relevant as condition, add similar processing for text_input_ids here.
-        
-        # 4. Multimodal fusion
+        # 3. Multimodal fusion (保留)
         fused_features = torch.cat([selfies_context_embeds, mol_3d_embeds], dim=-1)
         final_condition_embeds = self.multimodal_fusion_mlp(fused_features)
         # Shape: (batch_size, final_condition_dim)
 
-        # 5. Prediction heads for 3D generation
+        # 4. Prediction heads for 3D generation (保留)
         predicted_coordinates = self.coordinates_prediction_head(final_condition_embeds)
         predicted_atom_type_logits = self.atom_type_prediction_head(final_condition_embeds)
 
         # For SELFIES prediction (if selfies_coeff > 0)
-        # We need the raw LLM logits for the SELFIES tokens *before* any pooling
-        # This assumes the LLM's lm_head can correctly predict SELFIES tokens
-        # If SELFIES tokens are within the LLM's original vocabulary, we can reuse lm_head.
-        # Take the output logits corresponding to the SELFIES input part
-        # Note: llm_selfies_output.logits is raw logits from LLM.lm_head
-        selfies_logits = llm_selfies_output.logits[:, :selfies_input_ids.shape[1], :] # Only relevant part for SELFIES
+        selfies_logits = llm_selfies_output.logits[:, :selfies_input_ids.shape[1], :]
         
         # Return all necessary outputs for loss calculation
         return predicted_coordinates, predicted_atom_type_logits, selfies_logits, selfies_context_embeds, mol_3d_embeds, per_atom_features
@@ -253,22 +240,16 @@ class MMadaModelLM(nn.Module):
         text_input_ids: Optional[torch.LongTensor],
         text_attention_mask: Optional[torch.LongTensor],
         atom_vec: torch.LongTensor,
-        coordinates: torch.FloatTensor,
+        coordinates: torch.FloatTensor, # 这里的 coordinates 应该是原始干净的 x_0
         atoms_mask: torch.BoolTensor,
         task_type: str,
-        true_coordinates: torch.FloatTensor,
-        true_atom_vec: torch.LongTensor,
+        true_coordinates: torch.FloatTensor, # 真实的干净坐标 x_0
+        true_atom_vec: torch.LongTensor, # 真实的原子类型
         mask_schedule_coords: Callable, # For continuous diffusion noise
-        # New: true_selfies_labels for SELFIES masked prediction loss
         true_selfies_labels: Optional[torch.LongTensor] = None,
-        # New: inputs for hierarchical alignment if needed (e.g., intermediate features)
-        # This will be more complex and depend on how you define "hierarchical alignment"
-        edge_type: Optional[torch.LongTensor] = None, # Unused for now
-        bond_type: Optional[torch.LongTensor] = None, # Unused for now
-        dist: Optional[torch.FloatTensor] = None, # Unused for now
-        rdmol2selfies: Optional[torch.FloatTensor] = None, # Unused for now
         timesteps: Optional[torch.LongTensor] = None, # Timestep for diffusion
-    ):
+        # 移除 image_input_ids, image_attention_mask, true_image_labels
+    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         batch_size = coordinates.shape[0]
         losses = {}
 
@@ -277,44 +258,13 @@ class MMadaModelLM(nn.Module):
             timesteps = torch.randint(0, self.config.diffusion_timesteps, (batch_size,), device=coordinates.device).long()
         
         # Add noise to coordinates for continuous diffusion input (x_t)
-        # This follows the paper's continuous diffusion for 3D coordinates.
-        noise = torch.randn_like(coordinates) * atoms_mask.unsqueeze(-1).float() # Only noise valid atoms
+        # 这里的 coordinates 是原始干净的 x_0
+        noise = torch.randn_like(coordinates) * atoms_mask.unsqueeze(-1).float()
         alphas_bar_sqrt = mask_schedule_coords(timesteps).unsqueeze(-1).unsqueeze(-1)
         one_minus_alphas_bar_sqrt = (1.0 - alphas_bar_sqrt**2).sqrt()
 
-        # Noisy coordinates for model input
-        noisy_coordinates = (alphas_bar_sqrt * true_coordinates + one_minus_alphas_bar_sqrt * noise) * atoms_mask.unsqueeze(-1).float()
-
-
-        # Apply masking to selfies_input_ids for discrete diffusion (masked token prediction)
-        # This is crucial for the L_Diff-disc loss on SELFIES.
-        # We need a separate masking mechanism for SELFIES tokens.
-        # Assume mask_token_id is properly set in config (e.g., to LLM tokenizer's mask_token_id or a special token)
-        # For now, let's use a simple random masking
-        
-        # NOTE: The current implementation of SELFIES input in `train_mmada_stage2.py`
-        # treats them as conditioning. For L_Diff-disc, they need to be masked and predicted.
-        # This part requires changes in `prepare_molecular_inputs_and_labels` as well.
-        
-        # For now, let's assume `selfies_input_ids` here are already potentially masked for the LLM
-        # and `true_selfies_labels` holds the original unmasked tokens.
-        # If selfies_coeff > 0, we treat selfies as a prediction target with masking.
-        if self.config.selfies_coeff > 0 and true_selfies_labels is not None:
-            # Create a mask for SELFIES tokens based on a random ratio per token for discrete diffusion
-            # This is a simplified masking, a proper schedule like in training/utils.py's `get_mask_schedule`
-            # and `mask_or_random_replace_tokens` should be applied, but adapted for SELFIES vocabulary.
-            # Here, we'll simulate a mask directly within forward_process for demonstration.
-            # A more robust masking should happen in data preparation.
-            
-            # This is a placeholder for actual discrete diffusion masking
-            # For `L_Diff-disc`, `selfies_input_ids` should be the masked version (x_t)
-            # and `true_selfies_labels` should be the original tokens (x_0)
-            
-            # Let's create a dummy masked selfies_input_ids here for now if it's not pre-masked.
-            # In actual use, `selfies_input_ids` passed to this method should be the already masked version.
-            # Here, we assume `selfies_input_ids` passed in is the 'noisy' version (x_t)
-            # and `true_selfies_labels` is the 'clean' version (x_0).
-            pass # Masking should ideally be handled during data preparation / input creation for forward_process
+        # Noisy coordinates for model input (x_t)
+        noisy_coordinates = (alphas_bar_sqrt * coordinates + one_minus_alphas_bar_sqrt * noise) * atoms_mask.unsqueeze(-1).float()
 
 
         # Forward pass through the model
@@ -328,15 +278,13 @@ class MMadaModelLM(nn.Module):
             coordinates=noisy_coordinates, # Use noisy coordinates as input
             atoms_mask=atoms_mask,
             timesteps=timesteps,
+            # 移除 image_input_ids, image_attention_mask
         )
 
         # 1D (SELFIES/Text) to 3D Generation Task
         if task_type == '1d_to_3d':
             # 1. 坐标预测损失 (MSE Loss)
-            # We predict the noise `epsilon`, so the target for prediction is `noise`.
-            # The model actually predicts x_0, so we should compare predicted_coordinates directly to true_coordinates
-            # or derive noise prediction from predicted_coordinates.
-            # Given the existing code structure, it's predicting the denoised x_0 directly.
+            # 我们预测的是 x_0，所以与 true_coordinates 比较
             coords_loss = F.mse_loss(
                 predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
                 true_coordinates * atoms_mask.unsqueeze(-1).float(),
@@ -355,40 +303,26 @@ class MMadaModelLM(nn.Module):
             )
             losses['atom_type_loss'] = atom_type_loss
 
-            # 3. 新增：SELFIES 预测损失 (Masked Cross-Entropy Loss)
-            # This is L_Diff-disc from the paper for discrete tokens like SELFIES.
-            # We need to ensure `true_selfies_labels` contains the unmasked original SELFIES tokens.
-            # And `selfies_input_ids` fed into `forward` should be the masked version.
+            # 3. SELFIES 预测损失 (Masked Cross-Entropy Loss)
             if self.config.selfies_coeff > 0 and true_selfies_labels is not None:
-                # `selfies_logits` are from the LLM's head, predicting the next token.
-                # When using L_Diff-disc, we are predicting the *masked* tokens.
-                # Assuming `true_selfies_labels` has -100 for unmasked tokens (standard for HF CE loss)
-                # And `selfies_logits` covers the full sequence length for SELFIES.
-                
-                # Filter logits and labels to only masked positions if masking happens here
-                # Or assume true_selfies_labels already contains -100 where unmasked.
                 selfies_loss = F.cross_entropy(
-                    selfies_logits.view(-1, selfies_logits.size(-1)), # (B*L, vocab_size)
-                    true_selfies_labels.view(-1), # (B*L)
+                    selfies_logits.view(-1, selfies_logits.size(-1)),
+                    true_selfies_labels.view(-1),
                     ignore_index=-100, # Ignore padding and unmasked tokens (if -100 used)
                     reduction='mean'
                 )
                 losses['selfies_loss'] = selfies_loss
 
-            # 4. 新增：对齐损失 (Alignment Loss)
-            # Aligning SELFIES context embedding with Molecular 3D embedding
+            # 4. 对齐损失 (Alignment Loss)
             if self.config.alignment_coeff > 0:
                 # Project mol_3d_embeds to LLM hidden dim if needed for comparison
                 projected_mol_embeds = self.mol_embed_projection_for_alignment(mol_3d_embeds)
                 
                 # Using MSE as a simple alignment loss.
-                # More sophisticated methods like InfoNCE (contrastive loss) could be used but are more complex.
                 alignment_loss = F.mse_loss(selfies_context_embeds, projected_mol_embeds)
                 losses['alignment_loss'] = alignment_loss
 
-            # 5. 新增：分层对齐 (Hierarchical Alignment Loss)
-            # This is a more complex concept. For now, it's a placeholder.
-            # Example: Aligning per-atom features with a corresponding fine-grained SELFIES/text representation.
+            # 5. 分层对齐 (Hierarchical Alignment Loss)
             if self.config.hierarchical_coeff > 0:
                 # This would typically involve:
                 # 1. Getting more granular features from LLM for SELFIES (e.g., token-level features)

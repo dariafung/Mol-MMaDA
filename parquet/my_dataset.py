@@ -77,7 +77,7 @@ def parse_molecular_3d_data(raw_data_dict: Dict[str, Any]) -> Any:
     except Exception as e:
         # logging.error(f"Error parsing 3D data for ID {raw_data_dict.get('id', 'unknown')}: {e}")
         # print(f"Error parsing 3D data for ID {raw_data_dict.get('id', 'unknown')}: {e}") # Debugging
-        return None # 返回 None 表示解析失败，在 __iter__ 中跳过该样本
+        return {}
 
 
 # --- 修正后的 MolecularUnifiedDataset 类 ---
@@ -86,10 +86,11 @@ class MolecularUnifiedDataset(IterableDataset):
                  data_path: str, # 指向你的 Parquet 文件或包含 Parquet 文件的目录
                  tokenizer, # HuggingFace tokenizer 实例
                  mask_token_id: int, # 新增：掩码 token 的 ID
+                 diffusion_timesteps: int,
                  mask_schedule_name: str, # 新增：掩码调度名称
                  mask_schedule_start: float, # 新增：掩码调度开始值
                  mask_schedule_end: float, # 新增：掩码调度结束值
-                 selfies_mask_ratio: float, # 新增：SELFIES 掩码的比例
+                 selfies_mask_ratio: Optional[float] = None,
                  rank: int = 0,
                  world_size: int = 1,
                  shuffle: bool = True,
@@ -120,21 +121,23 @@ class MolecularUnifiedDataset(IterableDataset):
         self.max_text_length = max_text_length
         self.max_selfies_length = max_selfies_length
         self.max_atoms = max_atoms
-        self.tokenizer = tokenizer # 接收 tokenizer 实例
+        self.tokenizer = tokenizer
         self.include_edge_bond_dist = include_edge_bond_dist
         self.include_rdmol2selfies = include_rdmol2selfies
 
         # 掩码相关参数
         self.mask_token_id = mask_token_id
-        # 使用 get_mask_schedule 初始化掩码调度函数
-        self.mask_schedule_fn = get_mask_schedule(
-            mask_schedule_name, mask_schedule_start, mask_schedule_end, timesteps=1000 # 假设 timesteps 为 1000
+        self.diffusion_timesteps = diffusion_timesteps # 存储总的扩散步长
+
+        # mask_schedule_fn 用于获取给定 timestep 的 mask ratio
+        # 这里传入 diffusion_timesteps 作为 schedule 的总长度
+        self.mask_schedule_values = get_mask_schedule(
+            mask_schedule_name, # 例如 "linear", "cosine"
+            timesteps=self.diffusion_timesteps, # 传递总的扩散步长
+            start=mask_schedule_start,
+            end=mask_schedule_end
         )
-        self.selfies_mask_ratio = selfies_mask_ratio # selfies_mask_ratio 用于控制掩码量，即使有 schedule 也可以额外使用
-
-
-        # 分配给当前进程的文件
-        self.files = self.files[self.rank::self.world_size]
+        self.selfies_mask_ratio = selfies_mask_ratio # 如果不是动态的，可以使用固定值
 
     def read_parquet_file(self, file_path: str) -> Iterator[Dict[str, Any]]:
         """从 Parquet 文件读取所有列数据。"""
@@ -150,23 +153,24 @@ class MolecularUnifiedDataset(IterableDataset):
             # 可以选择跳过文件或记录错误
 
     def __iter__(self):
-        # 获取当前 worker 信息，用于分布式数据加载
         worker_info = torch.utils.data.get_worker_info()
         worker_id = worker_info.id if worker_info else 0
         num_workers = worker_info.num_workers if worker_info else 1
 
-        # 每个 worker 负责处理其分配到的文件子集
+        self_files_for_worker = self.files[self.rank::self.world_size]
+        
         # 确保每个 worker 有一个独立的随机种子，以确保数据 shuffle 和 mask 的随机性
-        worker_seed = self.rank + worker_id # 基于 rank 和 worker_id 生成种子
+        # 使用 os.getpid() 增加随机性，避免同一机器上不同 worker 种子相同
+        worker_seed = self.rank + worker_id + os.getpid()
         random.seed(worker_seed)
-        np.random.seed(worker_seed) # For numpy if used internally
+        np.random.seed(worker_seed) 
 
         while True:
-            file_list = self.files
+            file_list_shuffled = list(self_files_for_worker) # 复制一份，防止 random.shuffle 修改原始列表
             if self.shuffle:
-                random.shuffle(file_list)
+                random.shuffle(file_list_shuffled)
 
-            for file in file_list: # worker 已经分配了文件，所以直接遍历 file_list
+            for file in file_list_shuffled:
                 data_generator = self.read_parquet_file(file)
                 buffer = []
 
@@ -189,18 +193,19 @@ class MolecularUnifiedDataset(IterableDataset):
                         selfies_attention_mask = selfies_tokenized_clean.attention_mask[0]
                         
                         # --- 为 SELFIES 应用掩码 (L_Diff-disc) ---
-                        # 从调度器获取掩码概率，或者使用固定的 selfies_mask_ratio
-                        # 这里使用随机采样的浮点时间步 t
-                        t_float_for_mask = torch.rand(1).item() # 0到1之间的随机浮点数
-                        # selfies_mask_ratio_for_sample = self.mask_schedule_fn(torch.tensor([t_float_for_mask])).item()
-                        # 简化：直接使用配置的 selfies_mask_ratio 或 get_mask_schedule 返回的函数
-                        selfies_mask_ratio_for_sample = self.selfies_mask_ratio 
+                        # 随机采样一个整数 timestep (0 到 total_diffusion_timesteps - 1)
+                        # 这个 timestep 也将传递给模型
+                        timestep = torch.randint(0, self.diffusion_timesteps, (1,)).item()
+                        
+                        # 根据 timestep 从预计算的 schedule 中获取 mask ratio
+                        # 注意：mask_schedule_values 应该是一个 tensor，直接索引即可
+                        current_mask_ratio = self.mask_schedule_values[timestep].item()
                         
                         # 应用掩码和随机替换
                         masked_selfies_input_ids, true_selfies_labels_for_loss, _ = mask_or_random_replace_tokens(
                             selfies_input_ids_clean.unsqueeze(0), # mask_or_random_replace_tokens 期望批次维度
                             self.mask_token_id,
-                            mask_ratio=selfies_mask_ratio_for_sample, # 使用采样的掩码比例
+                            mask_ratio=current_mask_ratio, # 使用动态采样的掩码比例
                             tokenizer_vocab_size=self.tokenizer.vocab_size,
                             is_train=True # 假设在训练模式
                         )
@@ -210,7 +215,7 @@ class MolecularUnifiedDataset(IterableDataset):
                         # --- 2. 处理其他文本 (如果需要的话) ---
                         text_str = raw_data_item.get("text_description", "")
                         if not text_str or not isinstance(text_str, str):
-                            text_str = "" # 文本可以为空，但不跳过，将其置为空字符串
+                            text_str = "" 
 
                         text_tokenized = self.tokenizer(
                             text_str,
@@ -224,14 +229,13 @@ class MolecularUnifiedDataset(IterableDataset):
 
                         # --- 3. 处理 3D 数据 ---
                         processed_3d_data_tensors = parse_molecular_3d_data(raw_data_item)
-                        if processed_3d_data_tensors is None:
+                        if not processed_3d_data_tensors: # 检查是否是空字典
                             continue # 跳过 3D 数据解析失败的样本
                         
                         atom_vec = processed_3d_data_tensors.get("atom_vec")
                         coordinates = processed_3d_data_tensors.get("coordinates")
                         
                         if atom_vec is None or coordinates is None or atom_vec.shape[0] == 0:
-                            # print(f"Warning: 3D data incomplete or empty for ID {raw_data_item.get('id', 'unknown')}, skipping.")
                             continue # 跳过没有原子或坐标的样本
 
                         num_atoms = atom_vec.shape[0]
@@ -249,23 +253,20 @@ class MolecularUnifiedDataset(IterableDataset):
                         atoms_mask[:num_atoms] = True
 
                         sample = {
-                            "id": raw_data_item.get("id", str(random.randint(0, 1000000))), # 确保有ID
+                            "id": raw_data_item.get("id", str(random.randint(0, 1000000))),
                             "selfies_input_ids": selfies_input_ids,
                             "selfies_attention_mask": selfies_attention_mask,
-                            "true_selfies_labels": true_selfies_labels, # 新增：真实 SELFIES 标签
+                            "true_selfies_labels": true_selfies_labels,
                             "text_input_ids": text_input_ids,
                             "text_attention_mask": text_attention_mask,
                             "atom_vec": padded_atom_vec,
                             "coordinates": padded_coordinates,
                             "atoms_mask": atoms_mask,
-                            "task_type": "1d_to_3d" # 明确任务类型
+                            "timesteps": torch.tensor([timestep], dtype=torch.long), # 传递 timestep
+                            "task_type": "1d_to_3d"
                         }
 
                         if self.include_edge_bond_dist:
-                            # 确保这些张量不是None且形状正确
-                            # 假设 edge_type, bond_type, dist 也是原子维度的
-                            # num_atoms_original = processed_3d_data_tensors['atom_vec'].shape[0] # 获取原始原子数
-
                             if processed_3d_data_tensors.get('edge_type') is not None and processed_3d_data_tensors['edge_type'].numel() > 0:
                                 current_edge_shape = processed_3d_data_tensors['edge_type'].shape
                                 padded_edge_type = torch.zeros((self.max_atoms, self.max_atoms), dtype=torch.long)
@@ -285,9 +286,7 @@ class MolecularUnifiedDataset(IterableDataset):
                                 sample['dist'] = padded_dist
                             
                         if self.include_rdmol2selfies and processed_3d_data_tensors.get('rdmol2selfies') is not None and processed_3d_data_tensors['rdmol2selfies'].numel() > 0:
-                            # rdmol2selfies 是 [N_atoms, L_selfies_token] 格式，需要 N_atoms 和 L_selfies_token 都 padding
                             rdmol2selfies_current_shape = processed_3d_data_tensors['rdmol2selfies'].shape
-                            # L_selfies_token 应该与 max_selfies_length 匹配
                             padded_rdmol2selfies = torch.zeros((self.max_atoms, self.max_selfies_length), dtype=torch.float32) 
                             
                             copy_atoms_dim = min(rdmol2selfies_current_shape[0], self.max_atoms)
@@ -309,7 +308,7 @@ class MolecularUnifiedDataset(IterableDataset):
 
                     except Exception as e:
                         print(f"Error processing sample ID {raw_data_item.get('id', 'unknown')}: {e}")
-                        continue # 跳过错误样本
+                        continue
 
                 if buffer:
                     if self.shuffle:
@@ -318,7 +317,7 @@ class MolecularUnifiedDataset(IterableDataset):
                         yield item
 
             if not self.repeat:
-                break # 如果不重复，在所有文件处理完后退出循环
+                break
 
     def collate_fn(self, batch: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
@@ -328,13 +327,12 @@ class MolecularUnifiedDataset(IterableDataset):
         batched_data = collections.defaultdict(list)
         for item in batch:
             for k, v in item.items():
-                if v is not None: # 排除 None 值，避免在 append 时出错
+                if v is not None:
                     batched_data[k].append(v)
         
         final_batch = {}
 
         # --- 对文本和 SELFIES 序列进行填充 ---
-        # selfies_input_ids 和 selfies_attention_mask
         if "selfies_input_ids" in batched_data and len(batched_data["selfies_input_ids"]) > 0:
             padded_selfies = self.tokenizer.pad(
                 {"input_ids": batched_data["selfies_input_ids"], 
@@ -344,14 +342,11 @@ class MolecularUnifiedDataset(IterableDataset):
             )
             final_batch["selfies_input_ids"] = padded_selfies["input_ids"]
             final_batch["selfies_attention_mask"] = padded_selfies["attention_mask"]
-        else: # 处理批次中没有 SELFIES 的情况，返回空张量
+        else:
             final_batch["selfies_input_ids"] = torch.empty(0, dtype=torch.long)
             final_batch["selfies_attention_mask"] = torch.empty(0, dtype=torch.long)
         
-        # true_selfies_labels
         if "true_selfies_labels" in batched_data and len(batched_data["true_selfies_labels"]) > 0:
-            # For true_selfies_labels, pad with -100 (ignore_index for CE loss)
-            # Find max length in batch for true_selfies_labels
             max_len_selfies_labels = max([s.size(0) for s in batched_data["true_selfies_labels"]])
             padded_true_selfies_labels = []
             for s in batched_data["true_selfies_labels"]:
@@ -363,7 +358,6 @@ class MolecularUnifiedDataset(IterableDataset):
             final_batch["true_selfies_labels"] = torch.empty(0, dtype=torch.long)
 
 
-        # text_input_ids 和 text_attention_mask
         if "text_input_ids" in batched_data and len(batched_data["text_input_ids"]) > 0:
             padded_text = self.tokenizer.pad(
                 {"input_ids": batched_data["text_input_ids"], 
@@ -373,13 +367,12 @@ class MolecularUnifiedDataset(IterableDataset):
             )
             final_batch["text_input_ids"] = padded_text["input_ids"]
             final_batch["text_attention_mask"] = padded_text["attention_mask"]
-        else: # 处理批次中没有文本的情况，返回空张量
+        else:
             final_batch["text_input_ids"] = torch.empty(0, dtype=torch.long)
             final_batch["text_attention_mask"] = torch.empty(0, dtype=torch.long)
 
 
-        # --- 对 3D 相关的固定尺寸张量进行堆叠 ---
-        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask"]
+        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask", "timesteps"] # 添加 timesteps
         if self.include_edge_bond_dist:
             keys_to_stack.extend(["edge_type", "bond_type", "dist"])
         if self.include_rdmol2selfies:
@@ -389,79 +382,66 @@ class MolecularUnifiedDataset(IterableDataset):
             if k in batched_data and len(batched_data[k]) > 0:
                 final_batch[k] = torch.stack(batched_data[k], dim=0)
             else:
-                # 返回形状合适的空张量，避免后续模型输入问题
                 if k == "coordinates":
-                    final_batch[k] = torch.empty(0, self.max_atoms, 3, dtype=torch.float32)
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, 3, dtype=torch.float32) # 使用 len(batch)
                 elif k == "atoms_mask":
-                    final_batch[k] = torch.empty(0, self.max_atoms, dtype=torch.bool)
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.bool)
+                elif k == "timesteps": # 针对 timesteps 添加处理
+                    final_batch[k] = torch.empty(len(batch), 1, dtype=torch.long) # timesteps 是 (batch_size, 1)
                 elif k in ["edge_type", "bond_type", "dist"]:
-                    # 这里需要根据原始数据中的维度来确定，假设是 (max_atoms, max_atoms)
-                    final_batch[k] = torch.empty(0, self.max_atoms, self.max_atoms, dtype=torch.long if k != "dist" else torch.float32)
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.long if k != "dist" else torch.float32)
                 elif k == "rdmol2selfies":
-                    final_batch[k] = torch.empty(0, self.max_atoms, self.max_selfies_length, dtype=torch.float32)
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_selfies_length, dtype=torch.float32)
                 else: # atom_vec 或其他 1D 数组
-                    final_batch[k] = torch.empty(0, self.max_atoms, dtype=torch.long)
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.long)
 
-        # 任务类型通常在每个样本中是固定的，所以可以直接取第一个
         if "task_type" in batched_data and len(batched_data["task_type"]) > 0:
             final_batch["task_type"] = batched_data["task_type"][0]
         else:
-            final_batch["task_type"] = "1d_to_3d" # 默认任务类型
+            final_batch["task_type"] = "1d_to_3d"
 
 
         return final_batch
 
 
-# --- 你可以在这里添加一个简单的测试，但在训练脚本中调用更合适 ---
 if __name__ == '__main__':
-    # 假设你已经生成了 m3_molecular_data_test.parquet
     parquet_path = "/home/exouser/MMaDA/m3_molecular_data.parquet"
     
-    # 需要一个 tokenizer 来测试
-    # llm_model_name_or_path 应该在你的配置文件中定义
-    # 对于测试，我们可以使用一个通用的 BERT tokenizer，但实际训练应使用 LLaDA 的 tokenizer
     try:
-        # 使用 LLaDA 的 tokenizer，但在此处作为示例，如果路径不可用，会尝试其他
         example_tokenizer = AutoTokenizer.from_pretrained("GSAI-ML/LLaDA-8B-Instruct") 
     except Exception:
         print("Could not load LLaDA tokenizer, falling back to bert-base-uncased for testing.")
         example_tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
         
-    # 扩展 tokenizer 词汇表以包含 SELFIES 符号
-    # 仅当 tokenizer 没有这些 token 时才添加，并调整模型 embedding
-    # 这部分通常在训练脚本中处理更合适
     current_vocab_size = len(example_tokenizer)
     new_selfies_tokens_set = set(get_semantic_robust_alphabet())
     existing_tokens = set(example_tokenizer.get_vocab().keys())
     tokens_to_add = list(new_selfies_tokens_set - existing_tokens)
     if tokens_to_add:
         example_tokenizer.add_tokens(tokens_to_add)
-        # print(f"Added {len(tokens_to_add)} new SELFIES tokens. New vocab size: {len(example_tokenizer)}")
 
-
-    # 假设 mask_token_id 存在于 tokenizer 中，或手动指定一个
     mask_token_id_test = example_tokenizer.mask_token_id
     if mask_token_id_test is None:
         print("Tokenizer does not have a mask token. Using a dummy mask_token_id=0 (or another unused ID).")
-        # 实际训练中，需要确保 mask_token_id 是一个模型能理解的有效 ID
-        mask_token_id_test = example_tokenizer.pad_token_id # Fallback to pad token or another unused ID
+        mask_token_id_test = example_tokenizer.pad_token_id 
 
 
     dataset = MolecularUnifiedDataset(
         data_path=parquet_path,
         tokenizer=example_tokenizer,
         mask_token_id=mask_token_id_test,
+        diffusion_timesteps=1000, # 传递总扩散步长
         mask_schedule_name="linear", # 示例值
         mask_schedule_start=0.0001, # 示例值
         mask_schedule_end=0.02, # 示例值
-        selfies_mask_ratio=0.15, # 示例值
+        selfies_mask_ratio=0.15, # 示例值，现在这个值只在 mask_schedule_name 不是动态的情况下使用
         max_text_length=512,
         max_selfies_length=256,
-        max_atoms=100, # 假设你的测试数据中分子原子数不超过100
+        max_atoms=100,
         include_edge_bond_dist=True,
         include_rdmol2selfies=False,
         buffer_size=10,
-        shuffle=True, # 测试时可以设置为 True 看看效果
+        shuffle=True,
         repeat=False,
         rank=0,
         world_size=1
@@ -469,9 +449,9 @@ if __name__ == '__main__':
 
     train_dataloader = DataLoader(
         dataset,
-        batch_size=2, # 批处理大小
+        batch_size=2,
         collate_fn=dataset.collate_fn,
-        num_workers=0 # 测试时设置为0，避免多进程问题
+        num_workers=0
     )
     
     print("Starting data loading test...")
@@ -480,10 +460,10 @@ if __name__ == '__main__':
         for k, v in batch.items():
             if isinstance(v, torch.Tensor):
                 print(f"   {k}: {v.shape}, dtype={v.dtype}")
-            elif isinstance(v, str): # task_type is string
+            elif isinstance(v, str):
                 print(f"   {k}: {v}")
             else:
                 print(f"   {k}: {type(v)}, len={len(v) if hasattr(v, '__len__') else 'N/A'}")
-        if i >= 2: # 打印几个批次就停止
+        if i >= 2:
             break
     print("Data loading test complete.")
