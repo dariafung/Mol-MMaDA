@@ -17,50 +17,60 @@ experiment:
     resume_from_checkpoint: "latest"
 
 model:
-    vq_model:
-        type: "magvitv2"
-        vq_model_name: "showlab/magvitv2"
     mmada:
+        llm_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct" 
+        llm_config_path: "GSAI-ML/LLaDA-8B-Instruct"
         pretrained_model_path: "GSAI-ML/LLaDA-8B-Instruct"
         w_clip_vit: False
         new_vocab_size: 134656
         llm_vocab_size: 126464
-        codebook_size: 8192
-        num_vq_tokens: 256
         num_new_special_tokens: 0
         tie_word_embeddings: False
+
+        mol_atom_embedding_dim: 128
+        mol_coord_embedding_dim: 128
+        mol_3d_encoder_output_dim: 768 
+        num_atom_types: 120 
+        max_atoms: 256 
+
+        output_atom_coords_dim: 3 
+        output_atom_type_dim: 120 
+
+        d_model: 768 
+        fusion_hidden_dim: 2048
+        final_condition_dim: 768
+
+        diffusion_timesteps: 1000
+        noise_schedule_beta_start: 0.0001
+        noise_schedule_beta_end: 0.02
+        noise_schedule_name: "linear" 
+
+        coords_coeff: 1.0 
+        atom_type_coeff: 1.0 
+        selfies_coeff: 1.0 
+        alignment_coeff: 0.1 
+        hierarchical_coeff: 0.0 
+
+        mask_token_id: -1 
+        mask_replace_ratio: 0.1 
+        mask_schedule_start: 0.0001 
+        mask_schedule_end: 0.02 
 
     gradient_checkpointing: True
 
 dataset:
-    gen_type: "imagenet1k"
-    und_type: "captioning"
     combined_loader_mode: "max_size_cycle"
     params:
-        train_t2i_shards_path_or_url: "/data_storage/shared/datasets/imagenet-1k/data/train"
-        train_mmu_shards_path_or_url: [ "/data_storage/shared/datasets/SA-1B/sa_{000000..000999}.tar",
-                                        "/data_storage/shared/datasets/cc12m/raw/raw/{0000..0999}.tar",
-                                      "/data_storage/shared/datasets/laion-aesthetics-12m/{00000..00999}.tar" 
-        ]
         train_lm_shards_path_or_url: "/data_storage/shared/datasets/falcon-refinedweb/data/data/*.parquet"
-        add_caption_prompt: True
-        external_caption_path: "/data_storage/shared/datasets/SAM-LLaVA-Captions10M"
-        external_journeydb_caption_path: "/data_storage/shared/datasets/journeydb_anno/train_journeydb_anno.json"
-        external_laion12m_caption_path: "/data_storage/shared/datasets/laion-aesthetic-12m-captions"
-        external_cc12m_caption_path: "/data_storage/shared/datasets/cc12m/captions"
-        validation_prompts_file: "validation_prompts/imagenet_prompts.txt"
-        mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
+        train_mol_data_path: "/path/to/your/molecular_data.parquet"
         shuffle_buffer_size: 1000
         num_workers: 32
-        resolution: 256
         pin_memory: True
         persistent_workers: True
 
     preprocessing:
         max_seq_length: 128 # for text tokens
-        resolution: 256
-        center_crop: False
-        random_flip: False
+        max_selfies_length: 256
 
 optimizer:
     name: adamw
@@ -81,9 +91,8 @@ lr_scheduler:
 training:
     gradient_accumulation_steps: 2
     noise_type: "mask"
-    batch_size_t2i: 7
     batch_size_lm: 2
-    batch_size_mmu: 6
+    batch_size_mol: 4
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
@@ -95,6 +104,4 @@ training:
     max_grad_norm: 1
     guidance_scale: 1.5
     generation_timesteps: 12
-    t2i_coeff: 1.0
     lm_coeff: 0.1
-    mmu_coeff: 1.0

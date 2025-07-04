@@ -27,7 +27,6 @@ import html
 from pathlib import Path
 from typing import Union
 
-import numpy as np
 from omegaconf import OmegaConf
 import wandb
 import torch
@@ -340,25 +339,6 @@ def main():
     logger.info(f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
-
-    @torch.no_grad()
-    def prepare_inputs_and_labels_for_text(
-        texts: Union[str, list[str]], max_seq_len, eps=1e-3
-    ):
-        # create MLM mask and labels
-        
-        input_ids_lm, prompt_mask, labels_lm = uni_prompting((texts, max_seq_len), 'lm')
-        b, l = input_ids_lm.shape
-        t = torch.rand(b, device=input_ids_lm.device)
-        p_mask = (1 - eps) * t + eps
-        p_mask = p_mask[:, None].repeat(1, l)
-
-        masked_indices = torch.rand((b, l), device=input_ids_lm.device) < p_mask
-        # 126336 is used for [MASK] token
-        noisy_batch = torch.where(masked_indices, mask_id, input_ids_lm)
-        masked_indices = noisy_batch == mask_id 
-        
-        return noisy_batch, labels_lm, p_mask
 
     @torch.no_grad()
     def prepare_inputs_and_labels_for_chat_text(

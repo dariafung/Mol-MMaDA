@@ -25,7 +25,6 @@ from pathlib import Path
 from typing import Union
 
 import numpy as np
-from PIL import Image
 from omegaconf import OmegaConf
 import wandb
 import torch
@@ -37,13 +36,11 @@ from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import DistributedType, set_seed
 
-from training.data import Text2ImageDataset
-from training.utils import get_config, flatten_omega_conf, image_transform
-from training.imagenet_dataset import ImageNetDataset
+from training.utils import get_config, flatten_omega_conf
 from parquet import RefinedWebDataset, ChatDataset
 
-from models import  MAGVITv2, get_mask_schedule, MMadaModelLM, MMadaConfig
-from training.prompting_utils import UniversalPrompting, \
+from models import get_mask_schedule, MMadaModelLM, MMadaConfig
+from training.prompting_utils import UniversalPrompting
 
 from models.lr_schedulers import get_scheduler
 from models.logging import set_verbosity_info, set_verbosity_error
@@ -53,24 +50,8 @@ from torch.utils.data.distributed import DistributedSampler
 
 from training.utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens, AverageMeter
 
-try:
-    import apex
-
-    is_apex_available = True
-except ImportError:
-    is_apex_available = False
 
 logger = get_logger(__name__, log_level="INFO")
-
-
-def get_vq_model_class(model_type):
-    if model_type == "magvitv2":
-        return MAGVITv2
-    elif model_type == "vq16":
-        return VQ_16
-    else:
-        raise ValueError(f"model_type {model_type} not supported.")
-
 
 def main():
     #########################
@@ -93,11 +74,10 @@ def main():
         split_batches=True,
     )
 
-    total_batch_size_per_gpu = (config.training.batch_size_t2i
-                                + config.training.batch_size_lm
+    total_batch_size_per_gpu = (config.training.batch_size_lm
                                 + config.training.batch_size_mmu)
     total_batch_size = (
-            (config.training.batch_size_t2i + config.training.batch_size_lm + config.training.batch_size_mmu)
+            (config.training.batch_size_lm + config.training.batch_size_mmu)
             * accelerator.num_processes * config.training.gradient_accumulation_steps
     )
 
@@ -166,24 +146,13 @@ def main():
 
     uni_prompting = UniversalPrompting(tokenizer, max_text_len=config.dataset.preprocessing.max_seq_length,
                                        special_tokens=(
-                                           "<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>", "<|t2i|>",
+                                           "<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>",
                                            "<|mmu|>", "<|t2v|>", "<|v2v|>", "<|lvg|>"
                                        ),
                                        ignore_id=-100, cond_dropout_prob=config.training.cond_dropout_prob, use_reserved_token=True)
 
     print('special tokens : \n', uni_prompting.sptids_dict)
-
-    # VQ model for processing image into discrete tokens
-    vq_model = get_vq_model_class(config.model.vq_model.type)
-    if config.model.vq_model.get("pretrained_model_path", None):
-        vq_model = vq_model().to(accelerator.device)
-        state_dict = torch.load(config.model.vq_model.pretrained_model_path)['model']
-        vq_model.load_state_dict(state_dict)
-    else:
-        vq_model = vq_model.from_pretrained(config.model.vq_model.vq_model_name).to(accelerator.device)
-    vq_model.eval()
-    vq_model.requires_grad_(False)
-
+ 
     model = MMadaModelLM.from_pretrained(config.model.mmada.pretrained_model_path, torch_dtype=torch.bfloat16).to(accelerator.device)
 
     mask_id = model.config.mask_token_id
@@ -241,11 +210,6 @@ def main():
     #################################
     logger.info("Creating dataloaders and lr_scheduler")
 
-    total_batch_size_t2i_without_accum = config.training.batch_size_t2i * accelerator.num_processes
-    total_batch_size_t2i = (
-            config.training.batch_size_t2i * accelerator.num_processes * config.training.gradient_accumulation_steps
-    )
-
     # DataLoaders creation:
     # We use webdataset for data loading. The dataloaders are created with sampling with replacement.
     # We don't do dataset resuming here, instead we resample the shards and buffer each time. The sampling is stochastic.
@@ -253,118 +217,7 @@ def main():
     preproc_config = config.dataset.preprocessing
     dataset_config = config.dataset.params
 
-    # Data for generation
-    if config.dataset.gen_type == "t2i":
-        dataset = Text2ImageDataset(
-            train_shards_path_or_url=dataset_config.train_t2i_shards_path_or_url,
-            tokenizer=uni_prompting.text_tokenizer,  # we want to get raw texts, tokenizer is just for length counting
-            max_seq_length=preproc_config.max_seq_length,
-            num_train_examples=config.experiment.max_train_examples_t2i,
-            per_gpu_batch_size=config.training.batch_size_t2i,
-            global_batch_size=total_batch_size_t2i_without_accum,
-            num_workers=dataset_config.num_workers,
-            resolution=preproc_config.resolution,
-            shuffle_buffer_size=dataset_config.shuffle_buffer_size,
-            pin_memory=dataset_config.pin_memory,
-            persistent_workers=dataset_config.persistent_workers,
-            external_caption_path=dataset_config.external_caption_path,
-            external_journeydb_caption_path=dataset_config.external_journeydb_caption_path,
-            external_laion12m_caption_path=dataset_config.external_laion12m_caption_path,
-            external_cc12m_caption_path=dataset_config.external_cc12m_caption_path,
-            external_text_to_image_2M_512_caption_path=dataset_config.external_text_to_image_2M_512_caption_path,
-        )
-        train_dataloader_t2i = dataset.train_dataloader
-        num_update_steps_per_epoch = math.ceil(
-            train_dataloader_t2i.num_batches / config.training.gradient_accumulation_steps)
-        num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
-
-    elif config.dataset.gen_type == "t2i_parquet":
-        # this part relies on the internal packages, which will not be released
-        num_update_steps_per_epoch = math.ceil(config.experiment.max_train_examples_t2i / total_batch_size_t2i)
-        num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
-
-        train_dataloader_t2i = create_imagetext_dataloader(
-            train_shards_path_or_url=dataset_config.train_t2i_shards_path_or_url,
-            batch_size=config.training.batch_size_t2i,
-            image_size=preproc_config.resolution,
-            num_workers=dataset_config.num_workers,
-            num_readers=32,
-            predefined_steps=num_update_steps_per_epoch,
-            drop_last=True,
-            shuffle=True,
-            shuffle_buffer_size=dataset_config.shuffle_buffer_size
-        )
-
-    elif config.dataset.gen_type == "imagenet1k":
-        dataset_imagenet = ImageNetDataset(
-            dataset_config.train_t2i_shards_path_or_url,
-            image_size=preproc_config.resolution,
-        )
-
-        print('process index : ',
-              accelerator.process_index, ', ', accelerator.num_processes,
-              "Length: ", len(dataset_imagenet))
-
-        if accelerator.num_processes > 1:
-            sampler = DistributedSampler(dataset_imagenet,
-                                         num_replicas=accelerator.num_processes,
-                                         rank=accelerator.process_index,
-                                         shuffle=True,
-                                         )
-            shuffle = False
-        else:
-            sampler = None
-            shuffle = True
-
-        train_dataloader_t2i = DataLoader(dataset_imagenet, batch_size=config.training.batch_size_t2i,
-                                          sampler=sampler, collate_fn=dataset_imagenet.collate_fn,
-                                          shuffle=shuffle, num_workers=dataset_config.num_workers)
-        num_update_steps_per_epoch = math.ceil(len(dataset_imagenet) / total_batch_size_t2i)
-        num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
-
-    else:
-        raise ValueError(f"Unsupported dataset type {config.dataset.type}")
-
     total_batch_size_mmu_without_accum = config.training.batch_size_mmu * accelerator.num_processes
-    # Data for image captioning
-    if config.dataset.und_type == "captioning":
-        dataset_mmu = Text2ImageDataset(
-            train_shards_path_or_url=dataset_config.train_mmu_shards_path_or_url,
-            tokenizer=uni_prompting.text_tokenizer,  # we want to get raw texts
-            max_seq_length=preproc_config.max_seq_length,
-            num_train_examples=config.experiment.max_train_examples_mmu,
-            per_gpu_batch_size=config.training.batch_size_mmu,
-            global_batch_size=total_batch_size_mmu_without_accum,
-            num_workers=dataset_config.num_workers,
-            resolution=preproc_config.resolution,
-            shuffle_buffer_size=dataset_config.shuffle_buffer_size,
-            pin_memory=dataset_config.pin_memory,
-            persistent_workers=dataset_config.persistent_workers,
-            external_caption_path=dataset_config.external_caption_path,
-            external_journeydb_caption_path=dataset_config.external_journeydb_caption_path,
-            external_laion12m_caption_path=dataset_config.external_laion12m_caption_path,
-            external_cc12m_caption_path=dataset_config.external_cc12m_caption_path,
-            external_text_to_image_2M_512_caption_path=dataset_config.external_text_to_image_2M_512_caption_path,
-            is_captioning=True,
-            add_caption_prompt=dataset_config.add_caption_prompt,
-        )
-        train_dataloader_mmu = dataset_mmu.train_dataloader
-
-    elif config.dataset.und_type == "captioning_parquet":
-        train_dataloader_mmu = create_imagetext_dataloader(
-            train_shards_path_or_url=dataset_config.train_mmu_shards_path_or_url,
-            batch_size=config.training.batch_size_mmu,
-            image_size=preproc_config.resolution,
-            num_workers=dataset_config.num_workers,
-            num_readers=32,
-            predefined_steps=num_update_steps_per_epoch,
-            drop_last=True,
-            shuffle=True,
-            shuffle_buffer_size=dataset_config.shuffle_buffer_size,
-            is_captioning=True
-        )
-    else:
-        raise NotImplementedError(f"Unsupported dataset type {config.dataset.und_type}")
 
     dataset_lm = ChatDataset(data_path=dataset_config.train_lm_shards_path_or_url,
                                    rank=accelerator.process_index,
@@ -380,9 +233,7 @@ def main():
 
     # Combine these dataloaders into a single iterable model
     iterables = {
-        "t2i_flow": train_dataloader_t2i,
         "lm_flow": train_dataloader_lm,
-        "mmu_flow": train_dataloader_mmu,
     }
 
     combined_dataloader = CombinedLoader(iterables, mode=config.dataset.combined_loader_mode)
@@ -434,8 +285,6 @@ def main():
     logger.info("Preparing model, optimizer and dataloaders")
     model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
 
-    vq_model.to(device=accelerator.device)
-
     mask_dtype = model.get_input_embeddings().weight.dtype
 
     ##################################
@@ -446,29 +295,6 @@ def main():
     logger.info(f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
     logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
     logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
-
-    @torch.no_grad()
-    def prepare_inputs_and_labels(
-            pixel_values_or_image_ids: Union[torch.FloatTensor, torch.LongTensor],
-            texts: Union[str, list[str]],
-            min_masking_rate: float = 0.0,
-            is_train: bool = True,
-            seed: int = None
-    ):
-
-        image_tokens = vq_model.get_code(pixel_values_or_image_ids)
-        image_tokens = image_tokens + len(uni_prompting.text_tokenizer)
-        # create MLM mask and labels
-        input_ids, labels, loss_weight, mask_prob = mask_or_random_replace_tokens(
-            image_tokens,
-            mask_id,
-            config,
-            mask_schedule=mask_schedule,
-            is_train=is_train,
-            seed=seed
-        )
-        input_ids, masks, labels = uni_prompting((texts, input_ids, labels), 't2i')
-        return input_ids, labels, mask_prob, image_tokens, masks
     
     @torch.no_grad()
     def prepare_inputs_and_labels_for_text(
@@ -544,25 +370,13 @@ def main():
         model.train()
         for batch, batch_idx, dataloader_idx in combined_dataloader:
             # for loss calculation
-            batch_size_t2i = batch["t2i_flow"]["images"].shape[0]
             batch_size_lm = len(batch["lm_flow"]["input_ids"])
-            batch_size_mmu = batch["mmu_flow"]["images"].shape[0]
 
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             # Build formatted sequences for class-conditional/text-to-image generation
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
-            pixel_values, texts = batch["t2i_flow"]["images"], batch["t2i_flow"]["input_ids"]
             pixel_values = pixel_values.to(accelerator.device, non_blocking=True)
             data_time_m.update(time.time() - end)
-
-            # Encode images to image tokens, mask them and create input and labels
-            (
-                input_ids,
-                labels,
-                mask_prob,
-                image_tokens_ori,
-                t2i_masks
-            ) = prepare_inputs_and_labels(pixel_values, texts, config.training.min_masking_rate)
 
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             # Build formatted sequences for language modeling
@@ -585,17 +399,13 @@ def main():
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             if "llava" in config.dataset.und_type:
                 pixel_values_mmu, input_ids_mmu, labels_mmu = (batch["mmu_flow"]["images"], batch["mmu_flow"]["input_ids"],batch["mmu_flow"]["labels"])
-                pixel_values_mmu = pixel_values_mmu.to(accelerator.device, non_blocking=True)
-                input_ids_mmu = input_ids_mmu.to(accelerator.device, non_blocking=True)
-                image_tokens_mmu = vq_model.get_code(pixel_values_mmu)
-                image_tokens_mmu = image_tokens_mmu + len(uni_prompting.text_tokenizer)
 
                 input_ids_mmu = torch.cat([
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(
                         accelerator.device),
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(
                         accelerator.device),
-                    image_tokens_mmu,
+                    
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(
                         accelerator.device),
                     input_ids_mmu,
@@ -604,18 +414,12 @@ def main():
                 labels_mmu = torch.cat([
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
-                    torch.ones_like(image_tokens_mmu) * uni_prompting.ignore_id,
                     (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
                     labels_mmu.to(accelerator.device)
                 ], dim=1).long()
 
-            else:
-                pixel_values_mmu, texts_mmu = batch["mmu_flow"]["images"], batch["mmu_flow"]["input_ids"]
-                pixel_values_mmu = pixel_values_mmu.to(accelerator.device, non_blocking=True)
-                image_tokens_mmu = vq_model.get_code(pixel_values_mmu)
-                image_tokens_mmu = image_tokens_mmu + len(uni_prompting.text_tokenizer)
                 
-                input_ids_mmu, prompt_masks, labels_mmu = uni_prompting((image_tokens_mmu, texts_mmu), 'mmu')
+                input_ids_mmu, prompt_masks, labels_mmu = uni_prompting((texts_mmu), 'mmu')
                 (
                     input_ids_mmu,  
                     labels_mmu,
@@ -632,28 +436,21 @@ def main():
                 logger.info("Labels: {}".format(labels))
 
             with accelerator.accumulate(model):
-                logits, loss_t2i, loss_lm, loss_mmu = model.forward_process(
+                logits, loss_lm, loss_mmu = model.forward_process(
                     input_ids=input_ids,
                     labels=labels,
-                    batch_size_t2i=batch_size_t2i,
                     batch_size_lm=batch_size_lm,
-                    batch_size_mmu=batch_size_mmu,
                     max_seq_length=config.dataset.preprocessing.max_seq_length,
                     p_mask_lm=p_mask_lm,
                     p_mask_mmu=p_mask_mmu,  
                     answer_lengths=answer_lengths,
-                    t2i_masks=t2i_masks,
                     answer_lengths_lm=answer_lengths_lm
                 )
                 # Gather the losses across all processes for logging (if we use distributed training).
-                avg_loss_t2i = accelerator.gather(loss_t2i.repeat(config.training.batch_size_t2i)).mean()
                 avg_loss_lm = accelerator.gather(loss_lm.repeat(config.training.batch_size_lm)).mean()
                 avg_loss_mmu = accelerator.gather(loss_mmu.repeat(config.training.batch_size_mmu)).mean()
-                loss = config.training.t2i_coeff * loss_t2i + \
-                       config.training.lm_coeff * loss_lm + \
+                loss = config.training.lm_coeff * loss_lm + \
                        config.training.mmu_coeff * loss_mmu
-
-                avg_masking_rate = accelerator.gather(mask_prob.repeat(config.training.batch_size_t2i)).mean()
 
                 accelerator.backward(loss)
 
@@ -684,7 +481,6 @@ def main():
                             config.training.gradient_accumulation_steps * total_batch_size_per_gpu / batch_time_m.val
                     )
                     logs = {
-                        "step_loss_t2i": avg_loss_t2i.item(),
                         "step_loss_mmu": avg_loss_mmu.item(),
                         "step_loss_lm": avg_loss_lm.item(),
                         "lr": lr_scheduler.get_last_lr()[0],
@@ -697,7 +493,6 @@ def main():
 
                     logger.info(
                         f"Step: {global_step + 1} "
-                        f"Loss_t2i: {avg_loss_t2i.item():0.4f} "
                         f"Loss_mmu: {avg_loss_mmu.item():0.4f} "
                         f"Loss_lm: {avg_loss_lm.item():0.4f} "
                         f"Data (t): {data_time_m.val:0.4f}, {samples_per_second_per_gpu:0.2f}/s/gpu "
@@ -713,51 +508,19 @@ def main():
                     save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
 
                 if ((global_step + 1) % config.experiment.generate_every == 0 or global_step == start_step) and accelerator.is_main_process:
-                    generate_images(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        mask_schedule=mask_schedule,
-                        force_no_cfg=False
-                    )
-
-                    generate_images(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                        mask_schedule=mask_schedule,
-                        force_no_cfg=True
-                    )
+                   
 
                     visualize_predictions(
                         model,
-                        vq_model,
                         uni_prompting,
                         config,
                         global_step + 1,
                         input_ids,
-                        image_tokens_ori,
-                        batch["t2i_flow"]["images"],
                         texts,
                         logits,
                         accelerator
                     )
                     
-                    understanding_images(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        accelerator,
-                        config,
-                        global_step + 1,
-                    )
-
                     generate_chat_text(
                         model,
                         uni_prompting,
@@ -810,25 +573,13 @@ def visualize_predictions(
     images = torch.clamp((ori_images + 1.0) / 2.0, min=0.0, max=1.0)
     images *= 255.0
     images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    predictions = logits[:config.training.batch_size_t2i, -(config.model.mmada.num_vq_tokens + 1):-1:, len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens: len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens + config.model.mmada.codebook_size]
+    predictions = logits[len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens: len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens + config.model.mmada.codebook_size]
     predictions = predictions.argmax(axis=-1)
     # mask_token_id = config.model.mmada.vocab_size - 1 - len(uni_prompting.text_tokenizer)
     mask_token_id = accelerator.unwrap_model(model).config.mask_token_id - len(uni_prompting.text_tokenizer)
-    input_ids = input_ids[:config.training.batch_size_t2i, -(config.model.mmada.num_vq_tokens + 1):-1:] - len(uni_prompting.text_tokenizer)
+    input_ids = input_ids[-(config.model.mmada.num_vq_tokens + 1):-1:] - len(uni_prompting.text_tokenizer)
     mask_ratio = list((torch.where(input_ids == mask_token_id, 1, 0).sum(
         dim=-1) / config.model.mmada.num_vq_tokens).cpu().numpy())
-    predicted_images = torch.where(input_ids == mask_token_id, predictions, input_ids)
-    predicted_images = vq_model.decode_code(predicted_images)
-    predicted_images = torch.clamp((predicted_images + 1.0) / 2.0, min=0.0, max=1.0)
-    predicted_images *= 255.0
-    predicted_images = predicted_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    predicted_images = np.concatenate((images, recons_images, predicted_images), 2)
-    pil_images = [Image.fromarray(image) for image in predicted_images]
-
-    # Log images
-    wandb_images = [wandb.Image(image, caption=f'mask ratio: {r:0.2f} \n caption: {texts[i]}') for i, (image, r) in
-                    enumerate(zip(pil_images, mask_ratio))]
-    wandb.log({"Original images v.s. Reconstructed images v.s. Predicted images": wandb_images}, step=global_step)
 
     model.train()
 
@@ -855,9 +606,9 @@ def generate_images(
     mask_token_id = accelerator.unwrap_model(model).config.mask_token_id
     image_tokens = torch.ones((len(validation_prompts), config.model.mmada.num_vq_tokens), dtype=torch.long,
                               device=accelerator.device) * mask_token_id
-    input_ids, attention_mask = uni_prompting((validation_prompts, image_tokens), 't2i_gen')
+    input_ids, attention_mask = uni_prompting((validation_prompts, image_tokens))
     if not force_no_cfg and config.training.guidance_scale > 0:
-        uncond_input_ids, uncond_attention_mask = uni_prompting(([''] * len(validation_prompts), image_tokens), 't2i_gen')
+        uncond_input_ids, uncond_attention_mask = uni_prompting(([''] * len(validation_prompts), image_tokens))
         cfg_scale = config.training.guidance_scale
     else:
         uncond_input_ids = None
@@ -871,43 +622,14 @@ def generate_images(
         weight_dtype = torch.float32
 
     with torch.autocast("cuda", dtype=weight_dtype, enabled=accelerator.mixed_precision != "no"):
-        # Generate images
-        gen_token_ids = accelerator.unwrap_model(model).t2i_generate(
-            input_ids=input_ids,
-            uncond_input_ids=uncond_input_ids,
-            attention_mask=attention_mask,
-            uncond_attention_mask=uncond_attention_mask,
-            guidance_scale=cfg_scale,
-            temperature=config.training.get("generation_temperature", 1.0),
-            timesteps=config.training.generation_timesteps,
-            noise_schedule=mask_schedule,
-            noise_type=config.training.get("noise_type", "mask"),
-            predict_all_tokens=config.training.get("predict_all_tokens", False),
-            seq_len=config.model.mmada.num_vq_tokens,
-            uni_prompting=uni_prompting,
-            config=config,
-        )
     # In the beginning of training, the model is not fully trained and the generated token ids can be out of range
     # so we clamp them to the correct range.
+
     gen_token_ids = torch.clamp(gen_token_ids, max=accelerator.unwrap_model(model).config.codebook_size - 1, min=0)
-    images = vq_model.decode_code(gen_token_ids)
 
     model.train()
 
-    if config.training.get("pre_encode", False):
-        del vq_model
-
-    # Convert to PIL images
-    images = torch.clamp((images + 1.0) / 2.0, min=0.0, max=1.0)
-    images *= 255.0
-    images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    pil_images = [Image.fromarray(image) for image in images]
-
-    # Log images
-    wandb_images = [wandb.Image(image, caption=validation_prompts[i]) for i, image in enumerate(pil_images)]
-    wandb.log({f"Generated images with cfg {cfg_scale}": wandb_images}, step=global_step)
-    
-    
+  
 
 @torch.no_grad()
 def understanding_images(
@@ -936,12 +658,6 @@ def understanding_images(
         weight_dtype = torch.float32
     
     for i, file_name in enumerate(file_list):
-        image_path = os.path.join(config.dataset.params.mmu_image_root, file_name)
-        image_ori = Image.open(image_path).convert("RGB")
-        image = image_transform(image_ori, resolution=config.dataset.params.resolution).to(device)
-        image = image.unsqueeze(0)
-        images.append(image)
-        image_tokens = vq_model.get_code(image) + len(uni_prompting.text_tokenizer)
         batch_size = 1
         
         input_ids = uni_prompting.text_tokenizer(['<|start_header_id|>user<|end_header_id|>\n' + "Please describe this image in detail."  +'<eot_id><|start_header_id|>assistant<|end_header_id|>\n'])['input_ids']
@@ -950,7 +666,7 @@ def understanding_images(
         input_ids = torch.cat([
             (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(device),
             (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(device),
-            image_tokens,
+            
             (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(device),
             (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|sot|>']).to(device),
             input_ids
@@ -962,15 +678,6 @@ def understanding_images(
         text = uni_prompting.text_tokenizer.batch_decode(output_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
         responses[i] += text[0]
     model.train()
-    images = torch.cat(images, dim=0)
-    images = torch.clamp((images + 1.0) / 2.0, min=0.0, max=1.0)
-    images *= 255.0
-    images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    pil_images = [Image.fromarray(image) for image in images]
-
-    # Log images
-    wandb_images = [wandb.Image(image, caption=responses[i]) for i, image in enumerate(pil_images)]
-    wandb.log({"Understanding images": wandb_images}, step=global_step)
 
 @torch.no_grad()
 def generate_chat_text(
