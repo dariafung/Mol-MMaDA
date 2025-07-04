@@ -250,11 +250,6 @@ def main():
     #################################
     logger.info("Creating dataloaders and lr_scheduler")
 
-    total_batch_size_t2i_without_accum = config.training.batch_size_t2i * accelerator.num_processes
-    total_batch_size_t2i = (
-            config.training.batch_size_t2i * accelerator.num_processes * config.training.gradient_accumulation_steps
-    )
-
     # DataLoaders creation:
     # We use webdataset for data loading. The dataloaders are created with sampling with replacement.
     # We don't do dataset resuming here, instead we resample the shards and buffer each time. The sampling is stochastic.
@@ -702,20 +697,6 @@ def main():
                         global_step + 1,
                         mask_schedule=mask_schedule,
                     )
-
-                    visualize_predictions(
-                        model,
-                        vq_model,
-                        uni_prompting,
-                        config,
-                        global_step + 1,
-                        input_ids,
-                        image_tokens_ori,
-                        batch["t2i_flow"]["images"],
-                        texts,
-                        logits,
-                        accelerator
-                    )
                     
                     understanding_images(
                         model,
@@ -742,54 +723,6 @@ def main():
         model.save_pretrained(config.experiment.output_dir, safe_serialization=True)
 
     accelerator.end_training()
-
-
-@torch.no_grad()
-def visualize_predictions(
-        model,
-        vq_model,
-        uni_prompting,
-        config,
-        global_step,
-        input_ids,
-        image_tokens_ori,
-        ori_images,
-        texts,
-        logits,
-        accelerator
-):
-    logger.info("Visualizing predictions...")
-    model.eval()
-
-    recons_images = vq_model.decode_code(image_tokens_ori - len(uni_prompting.text_tokenizer))
-    recons_images = torch.clamp((recons_images + 1.0) / 2.0, min=0.0, max=1.0)
-    recons_images *= 255.0
-    recons_images = recons_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-
-    images = torch.clamp((ori_images + 1.0) / 2.0, min=0.0, max=1.0)
-    images *= 255.0
-    images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    predictions = logits[:config.training.batch_size_t2i, -(config.model.mmada.num_vq_tokens + 1):-1:, len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens: len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens + config.model.mmada.codebook_size]
-    
-    predictions = predictions.argmax(axis=-1)
-    mask_token_id = accelerator.unwrap_model(model).config.mask_token_id - len(uni_prompting.text_tokenizer)
-    input_ids = input_ids[:config.training.batch_size_t2i, -(config.model.mmada.num_vq_tokens + 1):-1:] - len(uni_prompting.text_tokenizer)
-    mask_ratio = list((torch.where(input_ids == mask_token_id, 1, 0).sum(
-        dim=-1) / config.model.mmada.num_vq_tokens).cpu().numpy())
-    predicted_images = torch.where(input_ids == mask_token_id, predictions, input_ids)
-    predicted_images = vq_model.decode_code(predicted_images)
-    predicted_images = torch.clamp((predicted_images + 1.0) / 2.0, min=0.0, max=1.0)
-    predicted_images *= 255.0
-    predicted_images = predicted_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    predicted_images = np.concatenate((images, recons_images, predicted_images), 2)
-    pil_images = [Image.fromarray(image) for image in predicted_images]
-
-    # Log images
-    wandb_images = [wandb.Image(image, caption=f'mask ratio: {r:0.2f} \n caption: {texts[i]}') for i, (image, r) in
-                    enumerate(zip(pil_images, mask_ratio))]
-    wandb.log({"Original images v.s. Reconstructed images v.s. Predicted images": wandb_images}, step=global_step)
-
-    model.train()
 
 
 @torch.no_grad()

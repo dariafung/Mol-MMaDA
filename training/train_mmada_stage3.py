@@ -146,8 +146,7 @@ def main():
 
     uni_prompting = UniversalPrompting(tokenizer, max_text_len=config.dataset.preprocessing.max_seq_length,
                                        special_tokens=(
-                                           "<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>",
-                                           "<|mmu|>", "<|t2v|>", "<|v2v|>", "<|lvg|>"
+                                           "<|mmu|>"
                                        ),
                                        ignore_id=-100, cond_dropout_prob=config.training.cond_dropout_prob, use_reserved_token=True)
 
@@ -373,63 +372,25 @@ def main():
             batch_size_lm = len(batch["lm_flow"]["input_ids"])
 
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
-            # Build formatted sequences for class-conditional/text-to-image generation
-            # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
-            pixel_values = pixel_values.to(accelerator.device, non_blocking=True)
-            data_time_m.update(time.time() - end)
-
-            # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             # Build formatted sequences for language modeling
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             max_seq_len = input_ids.shape[-1]
             texts_lm = batch["lm_flow"]["input_ids"]
             (
-                input_ids_lm,  
-                labels_lm,
+                input_ids,  
+                labels,
                 p_mask_lm,
                 answer_lengths_lm
             ) = prepare_inputs_and_labels_for_chat_text(texts_lm, max_seq_len)  
-            input_ids = torch.cat((input_ids, input_ids_lm.to(input_ids.device)), dim=0)
-            labels = torch.cat((labels, labels_lm.to(input_ids.device)), dim=0)
+            input_ids = torch.cat((input_ids, input_ids.to(input_ids.device)), dim=0)
+            labels = torch.cat((labels, labels.to(input_ids.device)), dim=0)
 
             
 
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
             # Build formatted sequences for captioning/multimodal understanding
             # *-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*-------*
-            if "llava" in config.dataset.und_type:
-                pixel_values_mmu, input_ids_mmu, labels_mmu = (batch["mmu_flow"]["images"], batch["mmu_flow"]["input_ids"],batch["mmu_flow"]["labels"])
 
-                input_ids_mmu = torch.cat([
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(
-                        accelerator.device),
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(
-                        accelerator.device),
-                    
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(
-                        accelerator.device),
-                    input_ids_mmu,
-                ], dim=1).long()
-
-                labels_mmu = torch.cat([
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
-                    (torch.ones(input_ids_mmu.shape[0], 1) * uni_prompting.ignore_id).to(accelerator.device),
-                    labels_mmu.to(accelerator.device)
-                ], dim=1).long()
-
-                
-                input_ids_mmu, prompt_masks, labels_mmu = uni_prompting((texts_mmu), 'mmu')
-                (
-                    input_ids_mmu,  
-                    labels_mmu,
-                    p_mask_mmu,
-                    answer_lengths
-                ) = prepare_inputs_and_labels_for_mmu(input_ids_mmu, prompt_masks, labels_mmu)
-                input_ids_mmu = input_ids_mmu.to(accelerator.device, non_blocking=True)
-
-            input_ids = torch.cat((input_ids, input_ids_mmu.to(input_ids.device)), dim=0)
-            labels = torch.cat((labels, labels_mmu.to(input_ids.device)), dim=0)
             
             if global_step == 0 and epoch == 0:
                 logger.info("Input ids: {}".format(input_ids))
@@ -442,8 +403,6 @@ def main():
                     batch_size_lm=batch_size_lm,
                     max_seq_length=config.dataset.preprocessing.max_seq_length,
                     p_mask_lm=p_mask_lm,
-                    p_mask_mmu=p_mask_mmu,  
-                    answer_lengths=answer_lengths,
                     answer_lengths_lm=answer_lengths_lm
                 )
                 # Gather the losses across all processes for logging (if we use distributed training).
@@ -508,19 +467,7 @@ def main():
                     save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
 
                 if ((global_step + 1) % config.experiment.generate_every == 0 or global_step == start_step) and accelerator.is_main_process:
-                   
 
-                    visualize_predictions(
-                        model,
-                        uni_prompting,
-                        config,
-                        global_step + 1,
-                        input_ids,
-                        texts,
-                        logits,
-                        accelerator
-                    )
-                    
                     generate_chat_text(
                         model,
                         uni_prompting,
@@ -546,138 +493,6 @@ def main():
         model.save_pretrained(config.experiment.output_dir, safe_serialization=True)
 
     accelerator.end_training()
-
-
-@torch.no_grad()
-def visualize_predictions(
-        model,
-        vq_model,
-        uni_prompting,
-        config,
-        global_step,
-        input_ids,
-        image_tokens_ori,
-        ori_images,
-        texts,
-        logits,
-        accelerator
-):
-    logger.info("Visualizing predictions...")
-    model.eval()
-
-    recons_images = vq_model.decode_code(image_tokens_ori - len(uni_prompting.text_tokenizer))
-    recons_images = torch.clamp((recons_images + 1.0) / 2.0, min=0.0, max=1.0)
-    recons_images *= 255.0
-    recons_images = recons_images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-
-    images = torch.clamp((ori_images + 1.0) / 2.0, min=0.0, max=1.0)
-    images *= 255.0
-    images = images.permute(0, 2, 3, 1).cpu().numpy().astype(np.uint8)
-    predictions = logits[len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens: len(uni_prompting.text_tokenizer) + config.model.mmada.num_new_special_tokens + config.model.mmada.codebook_size]
-    predictions = predictions.argmax(axis=-1)
-    # mask_token_id = config.model.mmada.vocab_size - 1 - len(uni_prompting.text_tokenizer)
-    mask_token_id = accelerator.unwrap_model(model).config.mask_token_id - len(uni_prompting.text_tokenizer)
-    input_ids = input_ids[-(config.model.mmada.num_vq_tokens + 1):-1:] - len(uni_prompting.text_tokenizer)
-    mask_ratio = list((torch.where(input_ids == mask_token_id, 1, 0).sum(
-        dim=-1) / config.model.mmada.num_vq_tokens).cpu().numpy())
-
-    model.train()
-
-
-@torch.no_grad()
-def generate_images(
-        model,
-        vq_model,
-        uni_prompting,
-        accelerator,
-        config,
-        global_step,
-        mask_schedule,
-        force_no_cfg = False
-):
-    logger.info("Generating images...")
-    model.eval()
-
-    # read validation prompts from file
-    with open(config.dataset.params.validation_prompts_file, "r") as f:
-        validation_prompts = f.read().splitlines()
-
-    mask_dtype = model.get_input_embeddings().weight.dtype
-    mask_token_id = accelerator.unwrap_model(model).config.mask_token_id
-    image_tokens = torch.ones((len(validation_prompts), config.model.mmada.num_vq_tokens), dtype=torch.long,
-                              device=accelerator.device) * mask_token_id
-    input_ids, attention_mask = uni_prompting((validation_prompts, image_tokens))
-    if not force_no_cfg and config.training.guidance_scale > 0:
-        uncond_input_ids, uncond_attention_mask = uni_prompting(([''] * len(validation_prompts), image_tokens))
-        cfg_scale = config.training.guidance_scale
-    else:
-        uncond_input_ids = None
-        uncond_attention_mask = None
-        cfg_scale = 0
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-    else:
-        weight_dtype = torch.float32
-
-    with torch.autocast("cuda", dtype=weight_dtype, enabled=accelerator.mixed_precision != "no"):
-    # In the beginning of training, the model is not fully trained and the generated token ids can be out of range
-    # so we clamp them to the correct range.
-
-    gen_token_ids = torch.clamp(gen_token_ids, max=accelerator.unwrap_model(model).config.codebook_size - 1, min=0)
-
-    model.train()
-
-  
-
-@torch.no_grad()
-def understanding_images(
-        model,
-        vq_model,
-        uni_prompting,
-        accelerator,
-        config,
-        global_step,
-):
-    logger.info("Understanding images...")
-    model.eval()
-        
-    file_list = os.listdir(config.dataset.params.mmu_image_root)
-    file_list = [f for f in file_list if f.lower().endswith(('.jpg', '.png', '.jpeg'))]
-    responses = ['' for i in range(len(file_list))]
-    images = []
-    
-    device = accelerator.device
-    
-    if accelerator.mixed_precision == "fp16":
-        weight_dtype = torch.float16
-    elif accelerator.mixed_precision == "bf16":
-        weight_dtype = torch.bfloat16
-    else:
-        weight_dtype = torch.float32
-    
-    for i, file_name in enumerate(file_list):
-        batch_size = 1
-        
-        input_ids = uni_prompting.text_tokenizer(['<|start_header_id|>user<|end_header_id|>\n' + "Please describe this image in detail."  +'<eot_id><|start_header_id|>assistant<|end_header_id|>\n'])['input_ids']
-        input_ids = torch.tensor(input_ids).to(device)
-
-        input_ids = torch.cat([
-            (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|mmu|>']).to(device),
-            (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|soi|>']).to(device),
-            
-            (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|eoi|>']).to(device),
-            (torch.ones(input_ids.shape[0], 1) * uni_prompting.sptids_dict['<|sot|>']).to(device),
-            input_ids
-        ], dim=1).long()
-        with torch.autocast("cuda", dtype=weight_dtype, enabled=accelerator.mixed_precision != "no"):
-            output_ids = accelerator.unwrap_model(model).mmu_generate(input_ids, max_new_tokens=config.dataset.preprocessing.max_seq_length, steps=config.dataset.preprocessing.max_seq_length // 2, block_length=config.dataset.preprocessing.max_seq_length // 4)
-        # output_ids = torch.stack(output_ids).squeeze()[None]
-
-        text = uni_prompting.text_tokenizer.batch_decode(output_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
-        responses[i] += text[0]
-    model.train()
 
 @torch.no_grad()
 def generate_chat_text(
@@ -802,11 +617,6 @@ def log_grad_norm(model, accelerator, global_step):
             grads = param.grad.detach().data
             grad_norm = (grads.norm(p=2) / grads.numel()).item()
             accelerator.log({"grad_norm/" + name: grad_norm}, step=global_step)
-
-
-        
-
-
 
 if __name__ == "__main__":
     main()
