@@ -1,5 +1,3 @@
-
-
 wandb:
   entity: null
   resume: 'auto'
@@ -17,7 +15,7 @@ experiment:
 
 model:
         dataset_type: molecular 
-        data_path: "/home/exouser/MMaDA/m3_molecular_data.parquet" 
+        data_path: "/home/exouser/MMaDA/m3_molecular_data.parquet" # 确保这个路径指向您的实际分子数据文件
         max_selfies_length: 256 
         max_atoms: 256      
         include_edge_bond_dist: True 
@@ -44,18 +42,21 @@ model:
         diffusion_timesteps: 1000
         noise_schedule_beta_start: 0.0001
         noise_schedule_beta_end: 0.02
+        # --- 添加这一行 ---
+        noise_schedule_name: "linear" # 或者 "cosine"，确保与 training.utils.get_noise_schedule 的支持名称一致
+        # --- 添加结束 ---
 
         gradient_checkpointing: True
 
         coords_coeff: 1.0 
         atom_type_coeff: 1.0 
-        selfies_coeff: 0.5 
-        alignment_coeff: 0.1 
-        hierarchical_coeff: 0.0 
+        selfies_coeff: 0.5 # 确保这个系数非零，以便计算 SELFIES 损失
+        alignment_coeff: 0.1 # 确保这个系数非零，以便计算对齐损失
+        hierarchical_coeff: 0.0 # 根据您的决定，目前保持为 0.0
 
-        mask_token_id: -1 
+        mask_token_id: -1 # train_mmada_stage2.py 中的代码会尝试从 tokenizer 获取正确的值
         mask_replace_ratio: 0.1 
-        mask_schedule_name: "linear" 
+        mask_schedule_name: "linear" # 这是用于离散掩码调度的名称
         mask_schedule_start: 0.0001
         mask_schedule_end: 0.02
 
@@ -89,7 +90,7 @@ lr_scheduler:
 training:
     gradient_accumulation_steps: 2
     noise_type: "mask"
-    batch_size: 2
+    batch_size: 2 # 这是 per_device_train_batch_size
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086

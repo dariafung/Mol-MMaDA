@@ -263,7 +263,6 @@ class MolecularUnifiedDataset(IterableDataset):
                             "coordinates": padded_coordinates,
                             "atoms_mask": atoms_mask,
                             "timesteps": torch.tensor([timestep], dtype=torch.long), # 传递 timestep
-                            "task_type": "1d_to_3d"
                         }
 
                         if self.include_edge_bond_dist:
@@ -394,12 +393,6 @@ class MolecularUnifiedDataset(IterableDataset):
                     final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_selfies_length, dtype=torch.float32)
                 else: # atom_vec 或其他 1D 数组
                     final_batch[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.long)
-
-        if "task_type" in batched_data and len(batched_data["task_type"]) > 0:
-            final_batch["task_type"] = batched_data["task_type"][0]
-        else:
-            final_batch["task_type"] = "1d_to_3d"
-
 
         return final_batch
 

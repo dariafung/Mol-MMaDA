@@ -117,6 +117,8 @@ class Molecular3DEncoder(nn.Module):
         )
 
     def forward(self, atom_vec: torch.LongTensor, coordinates: torch.FloatTensor, atoms_mask: torch.BoolTensor):
+        coordinates = coordinates.float()
+        
         atom_embeds = self.atom_embedding(atom_vec)
         coord_embeds = self.coord_projection(coordinates)
         
