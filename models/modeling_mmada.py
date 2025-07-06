@@ -121,6 +121,10 @@ class Molecular3DEncoder(nn.Module):
         
         atom_embeds = self.atom_embedding(atom_vec)
         coord_embeds = self.coord_projection(coordinates)
+        coord_embeds = coord_embeds.to(atom_embeds.dtype)
+
+        print(f"DEBUG (Molecular3DEncoder.forward): atom_embeds shape: {atom_embeds.shape}, dtype: {atom_embeds.dtype}")
+        print(f"DEBUG (Molecular3DEncoder.forward): coord_embeds shape: {coord_embeds.shape}, dtype: {coord_embeds.dtype}")
         
         # Concatenate atom type and coordinate embeddings
         combined_embeds = torch.cat([atom_embeds, coord_embeds], dim=-1)
@@ -167,9 +171,14 @@ class MMadaModelLM(nn.Module):
             num_layers=2
         )
 
-        # Prediction heads for 3D molecular generation (保留)
-        self.coordinates_prediction_head = nn.Linear(config.final_condition_dim, config.output_atom_coords_dim)
-        self.atom_type_prediction_head = nn.Linear(config.final_condition_dim, config.output_atom_type_dim)
+        self.coordinates_prediction_head = nn.Linear(
+            config.final_condition_dim,
+            config.max_atoms * config.output_atom_coords_dim
+        )
+        self.atom_type_prediction_head = nn.Linear(
+            config.final_condition_dim,
+            config.max_atoms * config.output_atom_type_dim
+)
 
         # New: Projection layer for alignment loss if dimensions don't match (保留)
         if config.mol_3d_encoder_output_dim != config.d_model:
@@ -225,8 +234,12 @@ class MMadaModelLM(nn.Module):
         # Shape: (batch_size, final_condition_dim)
 
         # 4. Prediction heads for 3D generation (保留)
-        predicted_coordinates = self.coordinates_prediction_head(final_condition_embeds)
-        predicted_atom_type_logits = self.atom_type_prediction_head(final_condition_embeds)
+        B = final_condition_embeds.size(0)
+        predicted_coordinates = self.coordinates_prediction_head(final_condition_embeds) \
+                .view(B, self.config.max_atoms, self.config.output_atom_coords_dim)
+
+        predicted_atom_type_logits = self.atom_type_prediction_head(final_condition_embeds) \
+                .view(B, self.config.max_atoms, self.config.output_atom_type_dim)
 
         # For SELFIES prediction (if selfies_coeff > 0)
         selfies_logits = llm_selfies_output.logits[:, :selfies_input_ids.shape[1], :]
@@ -259,6 +272,7 @@ class MMadaModelLM(nn.Module):
         if timesteps is None:
             timesteps = torch.randint(0, self.config.diffusion_timesteps, (batch_size,), device=coordinates.device).long()
         
+        timesteps = timesteps.view(-1)
         # Add noise to coordinates for continuous diffusion input (x_t)
         # 这里的 coordinates 是原始干净的 x_0
         noise = torch.randn_like(coordinates) * atoms_mask.unsqueeze(-1).float()
