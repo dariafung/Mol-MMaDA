@@ -15,7 +15,7 @@ experiment:
 
 model:
         dataset_type: molecular 
-        data_path: "/home/exouser/MMaDA/m3_molecular_data.parquet" # 确保这个路径指向您的实际分子数据文件
+        data_path: "/home/exouser/Mol-MMaDA/m3_molecular_data.parquet" # 确保这个路径指向您的实际分子数据文件
         max_selfies_length: 256 
         max_atoms: 256      
         include_edge_bond_dist: True 

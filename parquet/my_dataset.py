@@ -442,9 +442,9 @@ if __name__ == '__main__':
 
     train_dataloader = DataLoader(
         dataset,
-        batch_size=2,
+        batch_size=32,
         collate_fn=dataset.collate_fn,
-        num_workers=0
+        num_workers=8
     )
     
     print("Starting data loading test...")
