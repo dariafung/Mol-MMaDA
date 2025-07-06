@@ -398,7 +398,7 @@ class MolecularUnifiedDataset(IterableDataset):
 
 
 if __name__ == '__main__':
-    parquet_path = "/home/exouser/MMaDA/m3_molecular_data.parquet"
+    parquet_path = "/home/exouser/Mol-MMaDA/m3_molecular_data.parquet"
     
     try:
         example_tokenizer = AutoTokenizer.from_pretrained("GSAI-ML/LLaDA-8B-Instruct") 

@@ -158,8 +158,8 @@ def convert_m3_dataset(input_csv_path, output_parquet_path, num_rows_to_process=
 
 if __name__ == '__main__':
     # --- 请修改以下路径为你的实际文件路径 ---
-    input_csv_file = "/home/exouser/data/m3-20m/M^3-Datasets/M^3_Multi.csv" 
-    output_parquet_file = "/home/exouser/MMaDA/m3_molecular_data.parquet" # 建议保存到 MMaDA 目录或一个更大的数据卷
+    input_csv_file = "/media/volume/MMaDA/data/m3-20m/M^3-Datasets/M^3_Multi.csv"
+    output_parquet_file = "/home/exouser/Mol-MMaDA/m3_molecular_data.parquet" # 建议保存到 MMaDA 目录或一个更大的数据卷
 
     # --- 运行转换 ---
     # 先处理少量数据进行测试，例如前 1000 行
