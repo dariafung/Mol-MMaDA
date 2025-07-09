@@ -88,9 +88,9 @@ lr_scheduler:
         min_lr_scale: 0.1
 
 training:
-    gradient_accumulation_steps: 2
+    gradient_accumulation_steps: 8
     noise_type: "mask"
-    batch_size: 2 # 这是 per_device_train_batch_size
+    batch_size: 1 # 这是 per_device_train_batch_size
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
