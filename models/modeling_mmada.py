@@ -122,9 +122,6 @@ class Molecular3DEncoder(nn.Module):
         atom_embeds = self.atom_embedding(atom_vec)
         coord_embeds = self.coord_projection(coordinates)
         coord_embeds = coord_embeds.to(atom_embeds.dtype)
-
-        print(f"DEBUG (Molecular3DEncoder.forward): atom_embeds shape: {atom_embeds.shape}, dtype: {atom_embeds.dtype}")
-        print(f"DEBUG (Molecular3DEncoder.forward): coord_embeds shape: {coord_embeds.shape}, dtype: {coord_embeds.dtype}")
         
         # Concatenate atom type and coordinate embeddings
         combined_embeds = torch.cat([atom_embeds, coord_embeds], dim=-1)

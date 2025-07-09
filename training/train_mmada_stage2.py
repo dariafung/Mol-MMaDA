@@ -178,6 +178,7 @@ def main():
         beta_start=model_config.noise_schedule_beta_start,
         beta_end=model_config.noise_schedule_beta_end,
         timesteps=model_config.diffusion_timesteps,
+        device=accelerator.device
     )
 
     # --- 6. Training Loop ---

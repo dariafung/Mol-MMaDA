@@ -121,7 +121,7 @@ def apply_selfies_masking(
 
     return masked_selfies_ids.to(device), true_selfies_labels.to(device)
 
-def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps: int):
+def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps: int, device: Optional[torch.device] = None):
     """
     Returns a noise schedule for continuous diffusion.
     """
@@ -139,6 +139,9 @@ def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps:
 
     alphas = 1.0 - betas
     alphas_cumprod = torch.cumprod(alphas, dim=0)
+
+    if device is not None:
+        alphas_cumprod = alphas_cumprod.to(device)
     
     # Return a function that maps an integer timestep to alpha_bar_sqrt
     def schedule_fn(t: torch.Tensor) -> torch.Tensor:

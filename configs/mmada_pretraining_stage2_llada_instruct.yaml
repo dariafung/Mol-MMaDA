@@ -63,7 +63,7 @@ model:
 dataset:
     params:
         shuffle_buffer_size: 1000
-        num_workers: 0
+        num_workers: 8
         pin_memory: True
         persistent_workers: False
 
@@ -90,7 +90,7 @@ lr_scheduler:
 training:
     gradient_accumulation_steps: 8
     noise_type: "mask"
-    batch_size: 1 # 这是 per_device_train_batch_size
+    batch_size: 16 # 这是 per_device_train_batch_size
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086
