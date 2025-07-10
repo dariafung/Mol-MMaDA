@@ -7,8 +7,6 @@ experiment:
     project: "mmada-training-stage3"
     name: "mmada-training-stage3-llada-instruct"
     output_dir: "mmada-training-stage3-llada-instruct"
-    max_train_examples_t2i: 40000000    # 
-    max_train_examples_mmu: 40000000    #
     save_every: 10000
     eval_every: 2500
     generate_every: 1000
@@ -19,10 +17,6 @@ experiment:
     max_val_examples_t2i: 2000
 
 model:
-    vq_model:
-        type: "magvitv2"
-        vq_model_name: "showlab/magvitv2"
-
     mmada:
         tokenizer_path: "GSAI-ML/LLaDA-8B-Instruct"
         pretrained_model_path: "path/to/your/checkpoint"
@@ -37,15 +31,9 @@ model:
     gradient_checkpointing: True
 
 dataset:
-    gen_type: "t2i"
-    und_type: "captioning"
     combined_loader_mode: "max_size_cycle"
     params:
-        train_t2i_shards_path_or_url: [     #
-                                        "/data_storage/shared/datasets/JourneyDB/train/imgs/data/train/imgs/{000..199}.tgz",
-                                        "/data_storage/shared/datasets/laion-aesthetics-12m/{00000..00999}.tar",
-                                        "/data_storage/shared/datasets/text-to-image-2M/data_512_2M"
-        ]
+        
         train_mmu_shards_path_or_url: [ "/data_storage/shared/datasets/SA-1B/sa_{000000..000999}.tar",  #
                                         "/data_storage/shared/datasets/cc12m/raw/raw/{0000..0999}.tar",
                                       "/data_storage/shared/datasets/laion-aesthetics-12m/{00000..00999}.tar" 
@@ -54,11 +42,7 @@ dataset:
         add_caption_prompt: True
         external_caption_path: "/data_storage/shared/datasets/SAM-LLaVA-Captions10M"
         external_journeydb_caption_path: "/data_storage/shared/datasets/journeydb_anno/train_journeydb_anno.json"
-        external_laion12m_caption_path: "/data_storage/ty/datasets/laion-aesthetics-12m-images-2"
         external_cc12m_caption_path: "/data_storage/shared/datasets/cc12m/new_captions"
-        external_text_to_image_2M_512_caption_path: "/data_storage/shared/datasets/text-to-image-2M/data_512_2M_captions"
-        validation_prompts_file: "validation_prompts/text2image_prompts.txt"
-        mmu_image_root: "/data_storage/ty/MMaDA/mmu_validation"
         lm_chat_validation_jsonl: "/data_storage/ty/MMaDA/lm_chat_validation/questions.jsonl"
         shuffle_buffer_size: 1000
         num_workers: 32
@@ -92,7 +76,6 @@ lr_scheduler:
 training:
     gradient_accumulation_steps: 4  # 4
     noise_type: "mask"
-    batch_size_t2i: 4   # 3~4
     batch_size_lm: 1
     batch_size_mmu: 1
     mixed_precision: "bf16"
@@ -106,7 +89,6 @@ training:
     max_grad_norm: 1
     guidance_scale: 3
     generation_timesteps: 12
-    t2i_coeff: 1.0
     lm_coeff: 0.4 # ~0.5
     mmu_coeff: 0.5
     validation_seed: 42

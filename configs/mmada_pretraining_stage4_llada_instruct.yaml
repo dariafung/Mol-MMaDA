@@ -7,8 +7,6 @@ experiment:
     project: "mmada-training-stage4"
     name: "mmada-training-stage4-llada-instruct"
     output_dir: "mmada-training-stage4-llada-instruct"
-    max_train_examples_t2i: 40000000    # 
-    max_train_examples_mmu: 40000000    #
     save_every: 10000
     eval_every: 2500
     generate_every: 1000
@@ -19,10 +17,6 @@ experiment:
     max_val_examples_t2i: 2000
 
 model:
-    vq_model:
-        type: "magvitv2"
-        vq_model_name: "showlab/magvitv2"
-
     mmada:
         tokenizer_path: "GSAI-ML/LLaDA-8B-Instruct"
         pretrained_model_path: "/data_storage/ty/MMaDA/mmada-training-stage3-llada-instruct-512-cot-uni/checkpoint-210000/unwrapped_model"

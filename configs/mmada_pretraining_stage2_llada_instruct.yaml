@@ -9,7 +9,7 @@ experiment:
     max_train_examples_molecular: 1000
     save_every: 10000
     eval_every: 2500
-    log_every: 1
+    log_every: 10
     log_grad_norm_every: 100
     resume_from_checkpoint: "latest"
 
@@ -63,9 +63,9 @@ model:
 dataset:
     params:
         shuffle_buffer_size: 1000
-        num_workers: 8
+        num_workers: 16
         pin_memory: True
-        persistent_workers: False
+        persistent_workers: True
 
     preprocessing:
         max_text_length: 512 # for text tokens

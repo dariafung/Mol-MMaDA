@@ -256,7 +256,7 @@ def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     # Load model and tokenizer from a checkpoint
     # You will need to replace this with your actual model path
-    model_path = "/data_storage/ty/MMaDA/mmada-training-stage4-llada-instruct/checkpoint-170000/unwrapped_model"
+    model_path = "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct"
     
     # Load MMadaConfig from the model's pretrained config
     config = MMadaConfig.from_pretrained(model_path)
