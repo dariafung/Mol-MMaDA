@@ -14,25 +14,19 @@
 # limitations under the License.
 
 
-reserved_token_mapping = {
-    '<|soi|>': 126084,  
-    '<|eoi|>': 126085,
-    '<|sov|>': 126086,
-    '<|eov|>': 126087,
-    '<|t2i|>': 126088,
+reserved_token_mapping = { 
     '<|mmu|>': 126089,
     '<|t2v|>': 126090,
     '<|v2v|>': 126091,
     '<|lvg|>': 126092,
     '[iPAD]': 126093,
-    '<|r2i|>': 126094,
 }
 
 
 import torch
 class UniversalPrompting():
     def __init__(self, text_tokenizer,
-                 special_tokens=("<|soi|>", "<|eoi|>", "<|sov|>", "<|eov|>", "<|t2i|>", "<|mmu|>", "<|t2v|>", "<|v2v|>", "<|lvg|>"),
+                 special_tokens=("<|mmu|>", "<|t2v|>", "<|v2v|>", "<|lvg|>"),
                  max_text_len=8000, max_seq_len=377, ignore_id=-100, cond_dropout_prob=0.1, use_reserved_token=False):
         """
         :param text_tokenizer: original text tokenizer

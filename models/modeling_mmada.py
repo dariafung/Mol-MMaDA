@@ -57,13 +57,6 @@ class MMadaConfig(PretrainedConfig):
         super().__init__(**kwargs)
         self.llm_config_path = llm_config_path
         self.llm_model_name_or_path = llm_model_name_or_path
-        
-        # 移除图像相关参数的赋值
-        # self.image_tokenizer_path = image_tokenizer_path
-        # self.image_tokenizer_config_file = image_tokenizer_config_file
-        # self.image_tokenizer_model_file = image_tokenizer_model_file
-        # self.image_unet_config_path = image_unet_config_path
-        # self.image_unet_model_path = image_unet_model_path
 
         self.mol_atom_embedding_dim = mol_atom_embedding_dim
         self.mol_coord_embedding_dim = mol_coord_embedding_dim
