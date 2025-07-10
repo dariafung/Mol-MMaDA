@@ -1,4 +1,7 @@
 import torch
+import os
+import yaml
+import safetensors.torch
 import numpy as np
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
@@ -254,68 +257,147 @@ def generate_molecular_3d(
 
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
-    # Load model and tokenizer from a checkpoint
-    # You will need to replace this with your actual model path
-    model_path = "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct"
-    
-    # Load MMadaConfig from the model's pretrained config
-    config = MMadaConfig.from_pretrained(model_path)
 
-    model = MMadaModelLM.from_pretrained(model_path, trust_remote_code=True, torch_dtype=torch.bfloat16).to(device).eval()
-    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    # --- 1. 加载原始训练配置文件以获取 LLM 路径 ---
+    # 这个路径指向您的原始 YAML 配置文件，而不是检查点目录
+    original_config_path = "configs/mmada_pretraining_stage2_llada_instruct.yaml" 
+    # 确保这个路径相对于您运行 generate.py 的位置是正确的
+    
+    try:
+        with open(original_config_path, "r") as f:
+            original_config_dict = yaml.safe_load(f)
+        
+        # 简单地将字典转换为对象以便访问属性
+        class Config:
+            def __init__(self, d):
+                for a, b in d.items():
+                    if isinstance(b, dict):
+                        setattr(self, a, Config(b))
+                    else:
+                        setattr(self, a, b)
+        
+        args = Config(original_config_dict)
+
+        llm_model_name_or_path_from_yaml = args.model.llm_model_name_or_path
+        llm_config_path_from_yaml = args.model.llm_config_path
+        
+        print(f"Loaded LLM path from original config: {llm_model_name_or_path_from_yaml}")
+
+    except Exception as e:
+        print(f"Error loading original config file from {original_config_path}: {e}")
+        print("请确保原始训练配置文件存在且路径正确。")
+        return
+
+
+    # --- 2. 配置模型检查点路径 ---
+    checkpoint_dir = "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct/checkpoint-10000" 
+    model_state_dict_path = os.path.join(checkpoint_dir, "model.safetensors") 
+
+    print(f"Loading model config from: {checkpoint_dir}")
+    print(f"Loading model state dict from: {model_state_dict_path}")
+
+    # 2.1 从检查点目录加载 MMadaConfig
+    # 然后显式地从原始 YAML 设置 LLM 路径
+    try:
+        model_config = MMadaConfig.from_pretrained(checkpoint_dir)
+        # ⚠️ 手动设置 LLM 路径，覆盖检查点可能缺失/错误的配置
+        model_config.llm_model_name_or_path = llm_model_name_or_path_from_yaml
+        model_config.llm_config_path = llm_config_path_from_yaml
+
+    except Exception as e:
+        print(f"Error loading MMadaConfig from {checkpoint_dir} or setting LLM paths: {e}")
+        print("请确保检查点目录包含 config.json 文件，并且原始配置文件路径正确。")
+        return
+
+    # 2.2 实例化模型
+    model = MMadaModelLM(model_config)
+
+    # 2.3 加载模型权重（state_dict）
+    try:
+        state_dict = safetensors.torch.load_file(model_state_dict_path, device=str(device))
+        
+        new_state_dict = {}
+        for k, v in state_dict.items():
+            if k.startswith("module."):
+                new_state_dict[k[len("module."):]] = v
+            else:
+                new_state_dict[k] = v
+        
+        model.load_state_dict(new_state_dict)
+        model.to(device)
+        model.eval()
+    except Exception as e:
+        print(f"Error loading model state dict from {model_state_dict_path}: {e}")
+        return
+
+    # 2.4 加载 tokenizer (通常也保存在检查点目录中)
+    try:
+        tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+        if tokenizer.pad_token is None:
+            tokenizer.pad_token = tokenizer.eos_token
+    except Exception as e:
+        print(f"Error loading tokenizer from {checkpoint_dir}: {e}")
+        print("请确保此目录包含 tokenizer 相关文件（如 tokenizer_config.json, vocab.json 等）。")
+        return
 
     print("Model and Tokenizer loaded successfully.")
 
-    # --- Example usage of generate_molecular_3d ---
-    # Replace with a real SELFIES string for a molecule you want to generate
-    # Example SELFIES for water: [H][O][H]
-    # Example SELFIES for methane: [C]([H])([H])([H])[H]
-    selfies_to_generate = "[C][C](O)[N]" # Example: Alanine backbone or similar
+    # ... (以下是加载数据集和生成循环的代码，与之前提供的版本相同) ...
+    data_to_generate_path = "/media/volume/MMaDA/data/m3_molecular_data.parquet" 
+    print(f"Loading data from: {data_to_generate_path}")
 
-    print(f"\nGenerating 3D structure for SELFIES: '{selfies_to_generate}'")
+    try:
+        mol_df = pd.read_parquet(data_to_generate_path)
+    except Exception as e:
+        print(f"Error reading parquet file from {data_to_generate_path}: {e}")
+        print("Please ensure the data path is correct and the file exists.")
+        return
+    
+    if 'selfies_string' not in mol_df.columns:
+        print("Error: 'selfies_string' column not found in the Parquet file.")
+        print("Please check your Parquet file's column names and update the script accordingly.")
+        return
+    
+    selfies_list = mol_df['selfies_string'].tolist()
 
-    generated_coords, generated_atom_types = generate_molecular_3d(
-        model=model,
-        tokenizer=tokenizer,
-        selfies_string=selfies_to_generate,
-        max_atoms=config.max_atoms,
-        num_atom_types=config.num_atom_types,
-        output_atom_coords_dim=config.output_atom_coords_dim,
-        diffusion_timesteps=config.diffusion_timesteps,
-        noise_schedule_beta_start=config.noise_schedule_beta_start,
-        noise_schedule_beta_end=config.noise_schedule_beta_end,
-        sampling_steps=100, # Use fewer steps for faster inference
-        temperature_atom_type=0.5, # Adjust temperature for atom type sampling
-        device=device,
-    )
+    all_generated_molecules_data = []
 
-    print("\nGenerated 3D Coordinates (first 5 atoms):")
-    print(generated_coords[0, :5]) # Print for the first molecule, first 5 atoms
+    print(f"\nStarting 3D molecule generation for {len(selfies_list)} molecules...")
+    for idx, selfies_to_generate in enumerate(tqdm(selfies_list, desc="Generating 3D Molecules")):
+        if not isinstance(selfies_to_generate, str):
+            print(f"Skipping index {idx}: SELFIES is not a string. Value: {selfies_to_generate}")
+            continue
 
-    print("\nGenerated Atom Types (first 5 atoms):")
-    print(generated_atom_types[0, :5]) # Print for the first molecule, first 5 atoms
+        try:
+            generated_coords, generated_atom_types = generate_molecular_3d(
+                model=model,
+                tokenizer=tokenizer,
+                selfies_string=selfies_to_generate,
+                max_atoms=model_config.max_atoms, 
+                num_atom_types=model_config.num_atom_types, 
+                output_atom_coords_dim=model_config.output_atom_coords_dim, 
+                diffusion_timesteps=model_config.diffusion_timesteps, 
+                noise_schedule_beta_start=model_config.noise_schedule_beta_start, 
+                noise_schedule_beta_end=model_config.noise_schedule_beta_end, 
+                sampling_steps=100,
+                temperature_atom_type=0.5,
+                device=device,
+            )
+            
+            all_generated_molecules_data.append({
+                'original_selfies': selfies_to_generate,
+                'generated_coords': generated_coords.cpu().numpy(),
+                'generated_atom_types': generated_atom_types.cpu().numpy(),
+                'mol_id': mol_df.loc[idx, 'id'] if 'id' in mol_df.columns else idx
+            })
+        except Exception as e:
+            print(f"Error generating for SELFIES '{selfies_to_generate}' (index {idx}): {e}")
+            continue
 
-    # You might want to save these to a file (e.g., .xyz, .pdb) for visualization
-    # This part is commented out as it requires external libraries like openbabel or a custom atom_type_map
-    # import openbabel # You would need to install openbabel bindings for Python
-    # from openbabel import OBMol, OBAtom, OBResidue
-
-    # def save_xyz(coords, atom_types, filename, atom_type_map):
-    #     with open(filename, 'w') as f:
-    #         num_atoms = (atom_types != 0).sum().item() # Assuming 0 is padding
-    #         f.write(f"{num_atoms}\n")
-    #         f.write("Generated by MMaDA\n")
-    #         for i in range(max_atoms):
-    #             if atom_types[0, i] != 0: # Check if it's a valid atom
-    #                 atom_symbol = atom_type_map.get(atom_types[0, i].item(), 'X') # Map ID to symbol
-    #                 f.write(f"{atom_symbol} {coords[0, i, 0]:.4f} {coords[0, i, 1]:.4f} {coords[0, i, 2]:.4f}\n")
-
-    # # Example atom type mapping (you need to define your actual mapping)
-    # # This mapping should correspond to how your atom types are indexed during training
-    # atom_type_map = {1: 'H', 6: 'C', 7: 'N', 8: 'O', 9: 'F', 14: 'Si', 15: 'P', 16: 'S', 17: 'Cl', 35: 'Br', 53: 'I'} # Partial example
-    # save_xyz(generated_coords, generated_atom_types, "generated_molecule.xyz", atom_type_map)
-    # print("\nSaved generated molecule to generated_molecule.xyz (requires accurate atom_type_map).")
-
+    output_parquet_path = "generated_3d_molecules_for_evaluation.parquet"
+    pd.DataFrame(all_generated_molecules_data).to_parquet(output_parquet_path, index=False)
+    print(f"\nAll generated 3D molecules saved to: {output_parquet_path}")
+    print("您现在可以使用此 Parquet 文件中的生成数据进行评估。")
 
 if __name__ == '__main__':
     main()
