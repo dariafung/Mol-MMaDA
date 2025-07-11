@@ -258,17 +258,15 @@ def generate_molecular_3d(
 def main():
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
-    # --- 1. 加载原始训练配置文件以获取 LLM 路径 ---
-    # 这个路径指向您的原始 YAML 配置文件，而不是检查点目录
+    # --- 1. 从原始 YAML 配置文件加载完整的模型配置 ---
     original_config_path = "configs/mmada_pretraining_stage2_llada_instruct.yaml" 
-    # 确保这个路径相对于您运行 generate.py 的位置是正确的
     
     try:
         with open(original_config_path, "r") as f:
             original_config_dict = yaml.safe_load(f)
         
-        # 简单地将字典转换为对象以便访问属性
-        class Config:
+        # 这是一个辅助类，用于方便地通过属性访问 YAML 参数
+        class Config: 
             def __init__(self, d):
                 for a, b in d.items():
                     if isinstance(b, dict):
@@ -278,14 +276,43 @@ def main():
         
         args = Config(original_config_dict)
 
-        llm_model_name_or_path_from_yaml = args.model.llm_model_name_or_path
-        llm_config_path_from_yaml = args.model.llm_config_path
+        # 从 YAML 参数直接构建 MMadaConfig 实例
+        # 这样可以确保模型结构与原始训练时完全一致
+        model_config = MMadaConfig(
+            llm_config_path=args.model.llm_config_path,
+            llm_model_name_or_path=args.model.llm_model_name_or_path,
+            mol_atom_embedding_dim=args.model.mol_atom_embedding_dim,
+            mol_coord_embedding_dim=args.model.mol_coord_embedding_dim,
+            mol_3d_encoder_output_dim=args.model.mol_3d_encoder_output_dim,
+            num_atom_types=args.model.num_atom_types,
+            max_atoms=args.model.max_atoms,
+            output_atom_coords_dim=args.model.output_atom_coords_dim,
+            output_atom_type_dim=args.model.output_atom_type_dim,
+            d_model=args.model.d_model,
+            fusion_hidden_dim=args.model.fusion_hidden_dim,
+            final_condition_dim=args.model.final_condition_dim,
+            diffusion_timesteps=args.model.diffusion_timesteps,
+            noise_schedule_beta_start=args.model.noise_schedule_beta_start,
+            noise_schedule_beta_end=args.model.noise_schedule_beta_end,
+            coords_coeff=args.model.coords_coeff,
+            atom_type_coeff=args.model.atom_type_coeff,
+            selfies_coeff=args.model.selfies_coeff,
+            alignment_coeff=args.model.alignment_coeff,
+            hierarchical_coeff=args.model.hierarchical_coeff,
+            mask_token_id=args.model.mask_token_id,
+            mask_replace_ratio=args.model.mask_replace_ratio,
+            mask_schedule_name=args.model.mask_schedule_name,
+            mask_schedule_start=args.model.mask_schedule_start,
+            mask_schedule_end=args.model.mask_schedule_end,
+            # 请确保这里包含了 MMadaConfig 构造函数所需的**所有**参数
+            # 这些参数通常在 configs/mmada_pretraining_stage2_llada_instruct.yaml 的 'model' 部分定义
+        )
         
-        print(f"Loaded LLM path from original config: {llm_model_name_or_path_from_yaml}")
+        print(f"Loaded MMadaConfig directly from original YAML.")
 
     except Exception as e:
-        print(f"Error loading original config file from {original_config_path}: {e}")
-        print("请确保原始训练配置文件存在且路径正确。")
+        print(f"Error loading original config file from {original_config_path} or creating MMadaConfig: {e}")
+        print("请确保原始训练配置文件存在且路径正确，且包含所有必要的模型参数。")
         return
 
 
@@ -293,26 +320,12 @@ def main():
     checkpoint_dir = "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct/checkpoint-10000" 
     model_state_dict_path = os.path.join(checkpoint_dir, "model.safetensors") 
 
-    print(f"Loading model config from: {checkpoint_dir}")
     print(f"Loading model state dict from: {model_state_dict_path}")
 
-    # 2.1 从检查点目录加载 MMadaConfig
-    # 然后显式地从原始 YAML 设置 LLM 路径
-    try:
-        model_config = MMadaConfig.from_pretrained(checkpoint_dir)
-        # ⚠️ 手动设置 LLM 路径，覆盖检查点可能缺失/错误的配置
-        model_config.llm_model_name_or_path = llm_model_name_or_path_from_yaml
-        model_config.llm_config_path = llm_config_path_from_yaml
+    # 2.1 实例化模型（现在使用从 YAML 创建的 model_config）
+    model = MMadaModelLM(model_config) 
 
-    except Exception as e:
-        print(f"Error loading MMadaConfig from {checkpoint_dir} or setting LLM paths: {e}")
-        print("请确保检查点目录包含 config.json 文件，并且原始配置文件路径正确。")
-        return
-
-    # 2.2 实例化模型
-    model = MMadaModelLM(model_config)
-
-    # 2.3 加载模型权重（state_dict）
+    # 2.2 加载模型权重（state_dict）
     try:
         state_dict = safetensors.torch.load_file(model_state_dict_path, device=str(device))
         
@@ -328,9 +341,10 @@ def main():
         model.eval()
     except Exception as e:
         print(f"Error loading model state dict from {model_state_dict_path}: {e}")
+        print("请确保 model.safetensors 文件存在且是一个有效的模型 state_dict。")
         return
 
-    # 2.4 加载 tokenizer (通常也保存在检查点目录中)
+    # 2.3 加载 tokenizer (通常也保存在检查点目录中)
     try:
         tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
         if tokenizer.pad_token is None:
