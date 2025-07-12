@@ -414,7 +414,7 @@ def main():
                 "mol_id": mol_df.loc[idx, "id"] if "id" in mol_df.columns else idx,
                 "original_selfies": selfies_to_generate,
 
-                "generated_coords": generated_coords.squeeze(0).cpu().numpy().tolist(),
+                "generated_coords": generated_coords.cpu().float().tolist(),
                 "generated_atom_types": generated_atom_types.squeeze(0).cpu().numpy().tolist(),           
             })
         except Exception as e:
