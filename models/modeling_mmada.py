@@ -25,6 +25,7 @@ class MMadaConfig(PretrainedConfig):
         mol_3d_encoder_output_dim: int = 768, # Should match LLM hidden size or be projected
         num_atom_types: int = 120, # Example: up to U, with 0 for padding
         max_atoms: int = 256, # Max atoms in a molecule
+        max_selfies_length: int = 256,
         output_atom_coords_dim: int = 3, # x, y, z coordinates
         output_atom_type_dim: int = 120, # Number of atom types for classification
 
@@ -63,6 +64,7 @@ class MMadaConfig(PretrainedConfig):
         self.mol_3d_encoder_output_dim = mol_3d_encoder_output_dim
         self.num_atom_types = num_atom_types
         self.max_atoms = max_atoms
+        self.max_selfies_length = max_selfies_length 
         self.output_atom_coords_dim = output_atom_coords_dim
         self.output_atom_type_dim = output_atom_type_dim
 

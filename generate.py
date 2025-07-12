@@ -3,13 +3,18 @@ import os
 import yaml
 import safetensors.torch
 import numpy as np
+import pandas as pd  
 import torch.nn.functional as F
 from transformers import AutoTokenizer, AutoModel
 from typing import Tuple
+from tqdm.auto import tqdm 
 
 from models import MMadaModelLM
 from models.modeling_mmada import MMadaConfig 
 from training.utils import get_noise_schedule, get_mask_schedule, apply_selfies_masking 
+
+import gc
+from torch.cuda.amp import autocast
 
 def add_gumbel_noise(logits, temperature):
     '''
@@ -123,14 +128,14 @@ def generate_molecular_3d(
     model: MMadaModelLM,
     tokenizer: AutoTokenizer,
     selfies_string: str,
-    # Optional: text_prompt: str = None, # If you want to condition on text too
+    max_selfies_length: int,
     max_atoms: int, # From MMadaConfig.max_atoms
     num_atom_types: int, # From MMadaConfig.num_atom_types
     output_atom_coords_dim: int, # From MMadaConfig.output_atom_coords_dim (e.g., 3 for x,y,z)
     diffusion_timesteps: int, # From MMadaConfig.diffusion_timesteps
     noise_schedule_beta_start: float, # From MMadaConfig.noise_schedule_beta_start
     noise_schedule_beta_end: float, # From MMadaConfig.noise_schedule_beta_end
-    sampling_steps: int = 100, # Number of inference steps, can be less than diffusion_timesteps
+    sampling_steps: int = 30, # Number of inference steps, can be less than diffusion_timesteps
     temperature_atom_type: float = 1.0, # Temperature for sampling atom types (discrete)
     device: torch.device = 'cuda',
 ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
@@ -161,14 +166,14 @@ def generate_molecular_3d(
 
     # 1. Prepare SELFIES input
     selfies_input_ids = tokenizer(selfies_string, return_tensors="pt", padding="max_length",
-                                  truncation=True, max_length=model.config.max_position_embeddings)['input_ids'].to(device)
+                                  truncation=True, max_length=model.config.max_selfies_length )['input_ids'].to(device)
     selfies_attention_mask = (selfies_input_ids != tokenizer.pad_token_id).long().to(device)
     
     batch_size = selfies_input_ids.shape[0]
 
     # 2. Initialize noisy 3D data (random coordinates, unknown/padding atom types)
     # Start with random noise for coordinates (x_T)
-    current_coordinates = torch.randn(batch_size, max_atoms, output_atom_coords_dim, device=device)
+    current_coordinates = torch.randn(batch_size, max_atoms, output_atom_coords_dim, dtype=torch.float16, device=device)
     
     # Initialize atom types. Assuming 0 is a padding/unknown atom type.
     # We could also use a specific mask_id for atom types if defined in config/tokenizer vocab
@@ -200,20 +205,20 @@ def generate_molecular_3d(
 
         # Forward pass through MMadaModelLM to get predictions (x_0_pred, atom_type_logits_pred)
         # current_coordinates here acts as x_t
-        predicted_coordinates_x0, predicted_atom_type_logits, _, _, _, _ = model.forward(
-            selfies_input_ids=selfies_input_ids,
-            selfies_attention_mask=selfies_attention_mask,
-            atom_vec=current_atom_vec, # Pass current (noisy/refined) atom types
-            coordinates=current_coordinates, # Pass current (noisy) coordinates
-            atoms_mask=atoms_mask, # Pass current atom mask
-            timesteps=timesteps_tensor,
-            text_input_ids=None,
-            text_attention_mask=None,
-        )
+        with autocast(dtype=torch.float16):              # AMP 开启
+            predicted_coordinates_x0, predicted_atom_type_logits, *_ = model.forward(
+                selfies_input_ids=selfies_input_ids,
+                selfies_attention_mask=selfies_attention_mask,
+                atom_vec=current_atom_vec,
+                coordinates=current_coordinates,
+                atoms_mask=atoms_mask,
+                timesteps=timesteps_tensor,
+                text_input_ids=None,
+                text_attention_mask=None,
+            )
         # Apply mask to predictions
         predicted_coordinates_x0 = predicted_coordinates_x0 * atoms_mask.unsqueeze(-1).float()
         predicted_atom_type_logits = predicted_atom_type_logits * atoms_mask.unsqueeze(-1).float() # Mask logits
-
 
         # DDPM sampling step to get x_{t-1} from x_t and x_0_pred
         # Calculate alpha_t, alpha_bar_t for current t
@@ -253,6 +258,10 @@ def generate_molecular_3d(
         # and apply atom mask
         current_atom_vec = (sampled_atom_types * atoms_mask).long()
 
+    del predicted_coordinates_x0, predicted_atom_type_logits, sampled_atom_types, noise_pred
+    torch.cuda.empty_cache()
+    gc.collect()
+    
     return current_coordinates, current_atom_vec
 
 def main():
@@ -323,30 +332,32 @@ def main():
     print(f"Loading model state dict from: {model_state_dict_path}")
 
     # 2.1 实例化模型（现在使用从 YAML 创建的 model_config）
-    model = MMadaModelLM(model_config) 
+    model = MMadaModelLM(model_config).half()
 
     # 2.2 加载模型权重（state_dict）
     try:
-        state_dict = safetensors.torch.load_file(model_state_dict_path, device=str(device))
+        state_dict = safetensors.torch.load_file(model_state_dict_path, device="cpu")
         
-        new_state_dict = {}
-        for k, v in state_dict.items():
-            if k.startswith("module."):
-                new_state_dict[k[len("module."):]] = v
-            else:
-                new_state_dict[k] = v
-        
+        new_state_dict = {
+            (k[len("module."): ] if k.startswith("module.") else k): v.half()  # ☆ 转 FP16
+            for k, v in state_dict.items()
+        }
         model.load_state_dict(new_state_dict)
-        model.to(device)
-        model.eval()
+
+        model.to(device).eval()                        # 搬到 GPU
+        torch.set_float32_matmul_precision("high")
     except Exception as e:
         print(f"Error loading model state dict from {model_state_dict_path}: {e}")
         print("请确保 model.safetensors 文件存在且是一个有效的模型 state_dict。")
         return
 
-    # 2.3 加载 tokenizer (通常也保存在检查点目录中)
+    # 2.3 加载 tokenizer 
     try:
-        tokenizer = AutoTokenizer.from_pretrained(checkpoint_dir)
+        root_dir  = os.path.dirname(checkpoint_dir)        # ← ★ 新增
+        tokenizer = AutoTokenizer.from_pretrained(
+            root_dir,                                      # ← ★ 用父目录
+            trust_remote_code=True                         # ← ★ 保险起见
+        )
         if tokenizer.pad_token is None:
             tokenizer.pad_token = tokenizer.eos_token
     except Exception as e:
@@ -387,22 +398,25 @@ def main():
                 model=model,
                 tokenizer=tokenizer,
                 selfies_string=selfies_to_generate,
+                max_selfies_length=model_config.max_selfies_length,
                 max_atoms=model_config.max_atoms, 
                 num_atom_types=model_config.num_atom_types, 
                 output_atom_coords_dim=model_config.output_atom_coords_dim, 
                 diffusion_timesteps=model_config.diffusion_timesteps, 
                 noise_schedule_beta_start=model_config.noise_schedule_beta_start, 
                 noise_schedule_beta_end=model_config.noise_schedule_beta_end, 
-                sampling_steps=100,
+                sampling_steps=30,
                 temperature_atom_type=0.5,
                 device=device,
             )
             
             all_generated_molecules_data.append({
-                'original_selfies': selfies_to_generate,
-                'generated_coords': generated_coords.cpu().numpy(),
-                'generated_atom_types': generated_atom_types.cpu().numpy(),
                 'mol_id': mol_df.loc[idx, 'id'] if 'id' in mol_df.columns else idx
+                'original_selfies': selfies_to_generate,
+
+                "generated_coords": generated_coords.squeeze(0).cpu().numpy().tolist(),
+                "generated_atom_types": generated_atom_types.squeeze(0).cpu().numpy().tolist(),
+                
             })
         except Exception as e:
             print(f"Error generating for SELFIES '{selfies_to_generate}' (index {idx}): {e}")
