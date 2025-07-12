@@ -411,12 +411,11 @@ def main():
             )
             
             all_generated_molecules_data.append({
-                'mol_id': mol_df.loc[idx, 'id'] if 'id' in mol_df.columns else idx
-                'original_selfies': selfies_to_generate,
+                "mol_id": mol_df.loc[idx, "id"] if "id" in mol_df.columns else idx,
+                "original_selfies": selfies_to_generate,
 
                 "generated_coords": generated_coords.squeeze(0).cpu().numpy().tolist(),
-                "generated_atom_types": generated_atom_types.squeeze(0).cpu().numpy().tolist(),
-                
+                "generated_atom_types": generated_atom_types.squeeze(0).cpu().numpy().tolist(),           
             })
         except Exception as e:
             print(f"Error generating for SELFIES '{selfies_to_generate}' (index {idx}): {e}")
