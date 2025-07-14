@@ -414,19 +414,31 @@ def main():
             coords_np = generated_coords.squeeze(0).cpu().numpy()      # (max_atoms, 3)
             types_np  = generated_atom_types.squeeze(0).cpu().numpy()  # (max_atoms,)
 
-            # 把 numpy 转成纯 python list（Parquet/Arrow 能直接保存）
-            # 另外：把 padding 的原子（type == 0）对应的坐标用 None 占位，
-            # 读回时好区分真实原子 / padding
-            coords_list = [
-                xyz.tolist() if t != 0 else None          # xyz 是 [x,y,z]
-                for xyz, t in zip(coords_np, types_np)
-            ]
+            valid_generated_coords = []
+            valid_generated_types = []
 
+            for xyz, model_type_idx in zip(coords_np, types_np):
+                # 检查模型输出的原子类型索引是否在 RDKit 有效原子序数范围内 (1 到 118)
+                # 并且对应的坐标不是 None (尽管 generate_molecular_3d 应该不会生成 None 坐标)
+                if 1 <= model_type_idx <= 118 and xyz is not None:
+                    # 如果是有效的原子类型，直接保存其原子序数和坐标
+                    valid_generated_types.append(int(model_type_idx))
+                    valid_generated_coords.append(xyz.tolist())
+                else:
+                    # 打印警告，以便您了解哪些类型被跳过
+                    if not (1 <= model_type_idx <= 118):
+                         # 确保打印出实际的类型值，方便调试
+                        print(f"警告: 跳过模型输出的无效原子类型索引: {model_type_idx}")
+                    elif xyz is None:
+                        print(f"警告: 跳过模型输出的原子，因为它对应的坐标为 None (类型: {model_type_idx})")
+                    
+            # 最终用于保存到 Parquet 的数据
             all_generated_molecules_data.append({
-                "mol_id"          : int(mol_df.loc[idx, "id"]) if "id" in mol_df.columns else int(idx),
-                "original_selfies": selfies_to_generate,
-                "generated_coords": coords_list,          # list( len = max_atoms )
-                "generated_types" : types_np.tolist()     # list( len = max_atoms )
+                "mol_id"            : int(mol_df.loc[idx, "id"]) if "id" in mol_df.columns else int(idx),
+                "original_selfies"  : selfies_to_generate,
+                # 现在这里只包含有效的、RDKit 能识别的原子及其坐标
+                "generated_coords": valid_generated_coords, 
+                "generated_types" : valid_generated_types  
             })
 
         except Exception as e:
