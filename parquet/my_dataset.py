@@ -9,7 +9,6 @@ import torch.nn.functional as F
 from typing import List, Dict, Any, Optional, Iterator
 import pyarrow.parquet as pq
 from transformers import AutoTokenizer # 用于示例和加载LLM tokenizer
-from torchvision import transforms # 可能是原有文件中的遗留导入，如果不需要可以移除
 import json
 import numpy as np 
 from rdkit import Chem 
