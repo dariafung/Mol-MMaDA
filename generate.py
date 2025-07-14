@@ -205,7 +205,7 @@ def generate_molecular_3d(
 
         # Forward pass through MMadaModelLM to get predictions (x_0_pred, atom_type_logits_pred)
         # current_coordinates here acts as x_t
-        with autocast(dtype=torch.float16):              # AMP 开启
+        with torch.no_grad():              # AMP 开启
             predicted_coordinates_x0, predicted_atom_type_logits, *_ = model.forward(
                 selfies_input_ids=selfies_input_ids,
                 selfies_attention_mask=selfies_attention_mask,
@@ -216,6 +216,7 @@ def generate_molecular_3d(
                 text_input_ids=None,
                 text_attention_mask=None,
             )
+
         # Apply mask to predictions
         predicted_coordinates_x0 = predicted_coordinates_x0 * atoms_mask.unsqueeze(-1).float()
         predicted_atom_type_logits = predicted_atom_type_logits * atoms_mask.unsqueeze(-1).float() # Mask logits
@@ -332,14 +333,14 @@ def main():
     print(f"Loading model state dict from: {model_state_dict_path}")
 
     # 2.1 实例化模型（现在使用从 YAML 创建的 model_config）
-    model = MMadaModelLM(model_config).half()
+    model = MMadaModelLM(model_config)
 
     # 2.2 加载模型权重（state_dict）
     try:
         state_dict = safetensors.torch.load_file(model_state_dict_path, device="cpu")
         
         new_state_dict = {
-            (k[len("module."): ] if k.startswith("module.") else k): v.half()  # ☆ 转 FP16
+            (k[len("module."): ] if k.startswith("module.") else k): v.float() 
             for k, v in state_dict.items()
         }
         model.load_state_dict(new_state_dict)
@@ -410,13 +411,24 @@ def main():
                 device=device,
             )
             
-            all_generated_molecules_data.append({
-                "mol_id": mol_df.loc[idx, "id"] if "id" in mol_df.columns else idx,
-                "original_selfies": selfies_to_generate,
+            coords_np = generated_coords.squeeze(0).cpu().numpy()      # (max_atoms, 3)
+            types_np  = generated_atom_types.squeeze(0).cpu().numpy()  # (max_atoms,)
 
-                "generated_coords": generated_coords.cpu().float().tolist(),
-                "generated_atom_types": generated_atom_types.squeeze(0).cpu().numpy().tolist(),           
+            # 把 numpy 转成纯 python list（Parquet/Arrow 能直接保存）
+            # 另外：把 padding 的原子（type == 0）对应的坐标用 None 占位，
+            # 读回时好区分真实原子 / padding
+            coords_list = [
+                xyz.tolist() if t != 0 else None          # xyz 是 [x,y,z]
+                for xyz, t in zip(coords_np, types_np)
+            ]
+
+            all_generated_molecules_data.append({
+                "mol_id"          : int(mol_df.loc[idx, "id"]) if "id" in mol_df.columns else int(idx),
+                "original_selfies": selfies_to_generate,
+                "generated_coords": coords_list,          # list( len = max_atoms )
+                "generated_types" : types_np.tolist()     # list( len = max_atoms )
             })
+
         except Exception as e:
             print(f"Error generating for SELFIES '{selfies_to_generate}' (index {idx}): {e}")
             continue
