@@ -26,8 +26,8 @@ def add_gumbel_noise(logits, temperature):
         return logits
     logits = logits.to(torch.float64)
     noise = torch.rand_like(logits, dtype=torch.float64)
-    gumbel_noise = (- torch.log(noise)) ** temperature
-    return logits.exp() / gumbel_noise
+    gumbel_noise = -torch.log(-torch.log(noise + 1e-10)) 
+    return logits + gumbel_noise * temperature
 
 
 def get_num_transfer_tokens(mask_index, steps):
@@ -173,7 +173,7 @@ def generate_molecular_3d(
 
     # 2. Initialize noisy 3D data (random coordinates, unknown/padding atom types)
     # Start with random noise for coordinates (x_T)
-    current_coordinates = torch.randn(batch_size, max_atoms, output_atom_coords_dim, dtype=torch.float16, device=device)
+    current_coordinates = torch.randn(batch_size, max_atoms, output_atom_coords_dim, dtype=torch.bfloat16, device=device)
     
     # Initialize atom types. Assuming 0 is a padding/unknown atom type.
     # We could also use a specific mask_id for atom types if defined in config/tokenizer vocab
@@ -314,8 +314,6 @@ def main():
             mask_schedule_name=args.model.mask_schedule_name,
             mask_schedule_start=args.model.mask_schedule_start,
             mask_schedule_end=args.model.mask_schedule_end,
-            # 请确保这里包含了 MMadaConfig 构造函数所需的**所有**参数
-            # 这些参数通常在 configs/mmada_pretraining_stage2_llada_instruct.yaml 的 'model' 部分定义
         )
         
         print(f"Loaded MMadaConfig directly from original YAML.")
@@ -395,6 +393,9 @@ def main():
             continue
 
         try:
+            num_inference_steps = args.training.generation_timesteps
+            atom_type_temp = args.model.generation_temperature_atom_type
+
             generated_coords, generated_atom_types = generate_molecular_3d(
                 model=model,
                 tokenizer=tokenizer,
@@ -406,8 +407,8 @@ def main():
                 diffusion_timesteps=model_config.diffusion_timesteps, 
                 noise_schedule_beta_start=model_config.noise_schedule_beta_start, 
                 noise_schedule_beta_end=model_config.noise_schedule_beta_end, 
-                sampling_steps=30,
-                temperature_atom_type=0.5,
+                sampling_steps=num_inference_steps,      
+                temperature_atom_type=atom_type_temp,
                 device=device,
             )
             

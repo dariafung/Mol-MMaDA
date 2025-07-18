@@ -73,6 +73,7 @@ def main():
         diffusion_timesteps=args.model.diffusion_timesteps,
         noise_schedule_beta_start=args.model.noise_schedule_beta_start,
         noise_schedule_beta_end=args.model.noise_schedule_beta_end,
+        noise_schedule_name=args.model.noise_schedule_name,
         coords_coeff=args.model.coords_coeff,
         atom_type_coeff=args.model.atom_type_coeff,
         selfies_coeff=args.model.selfies_coeff, # Ensure this is passed from config
@@ -174,10 +175,10 @@ def main():
     # Define noise schedule for continuous coordinates diffusion
     # --- 确保 noise_schedule_name 在 config.yaml 中有定义 ---
     mask_schedule_coords = get_noise_schedule(
-        name=model_config.mask_schedule_name, # 使用 model_config 中的 mask_schedule_name，现在用于 noise schedule
-        beta_start=model_config.noise_schedule_beta_start,
-        beta_end=model_config.noise_schedule_beta_end,
-        timesteps=model_config.diffusion_timesteps,
+        name=args.model.noise_schedule_name, # <--- 修正为使用 args.model.noise_schedule_name
+        beta_start=args.model.noise_schedule_beta_start,
+        beta_end=args.model.noise_schedule_beta_end,
+        timesteps=args.model.diffusion_timesteps,
         device=accelerator.device
     )
 
