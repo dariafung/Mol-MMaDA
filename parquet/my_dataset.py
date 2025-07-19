@@ -137,6 +137,7 @@ class MolecularUnifiedDataset(IterableDataset):
             end=mask_schedule_end
         )
         self.selfies_mask_ratio = selfies_mask_ratio # 如果不是动态的，可以使用固定值
+        self.atom_type_mask_prob = atom_type_mask_prob
 
     def read_parquet_file(self, file_path: str) -> Iterator[Dict[str, Any]]:
         """从 Parquet 文件读取所有列数据。"""
@@ -250,6 +251,16 @@ class MolecularUnifiedDataset(IterableDataset):
                         
                         atoms_mask = torch.zeros((self.max_atoms,), dtype=torch.bool)
                         atoms_mask[:num_atoms] = True
+                        masked_atom_vec = padded_atom_vec.clone()
+
+                        if self.atom_type_mask_prob > 0:
+                            # 创建一个随机掩码，只在真实原子位置上（atoms_mask=True）生效
+                            prob_mask = torch.rand_like(masked_atom_vec, dtype=torch.float32) < self.atom_type_mask_prob
+                            # 确保我们不会掩码掉填充的原子
+                            final_mask = prob_mask & atoms_mask
+                            
+                            # 将被掩码的位置设置为 0 (通常 0 代表未知或填充原子)
+                            masked_atom_vec[final_mask] = 0
 
                         sample = {
                             "id": raw_data_item.get("id", str(random.randint(0, 1000000))),
@@ -258,10 +269,14 @@ class MolecularUnifiedDataset(IterableDataset):
                             "true_selfies_labels": true_selfies_labels,
                             "text_input_ids": text_input_ids,
                             "text_attention_mask": text_attention_mask,
-                            "atom_vec": padded_atom_vec,
-                            "coordinates": padded_coordinates,
+                            "atom_vec": masked_atom_vec,          
+                            "true_atom_vec": padded_atom_vec,     
+                            
+                            "coordinates": padded_coordinates,    
+                            "true_coordinates": padded_coordinates.clone(), 
+                            
                             "atoms_mask": atoms_mask,
-                            "timesteps": torch.tensor([timestep], dtype=torch.long), # 传递 timestep
+                            "timesteps": torch.tensor([timestep], dtype=torch.long), 
                         }
 
                         if self.include_edge_bond_dist:

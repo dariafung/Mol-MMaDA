@@ -9,16 +9,11 @@ experiment:
     output_dir: "mmada-demo"
 
 model:
-    vq_model:
-        type: "magvitv2"
-        vq_model_name: "showlab/magvitv2"
-
     mmada:
         pretrained_model_path: "Gen-Verse/MMaDA-8B-Base"
         w_clip_vit: False
         new_vocab_size: 134656
         llm_vocab_size: 126464
-        codebook_size: 8192
         num_vq_tokens: 1024
         num_new_special_tokens: 0
         tie_word_embeddings: False

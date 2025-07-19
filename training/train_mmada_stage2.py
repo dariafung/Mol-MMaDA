@@ -133,6 +133,7 @@ def main():
         mask_schedule_start=model_config.mask_schedule_start,
         mask_schedule_end=model_config.mask_schedule_end,
         selfies_mask_ratio=args.model.selfies_mask_ratio, # 传递 selfies_mask_ratio
+        atom_type_mask_prob=config.model.atom_type_mask_prob,
         include_edge_bond_dist=args.model.include_edge_bond_dist, # 确保传递了这些
         include_rdmol2selfies=args.model.include_rdmol2selfies, # 确保传递了这些
         # dataset.params 里的参数
@@ -199,15 +200,17 @@ def main():
             "selfies_attention_mask": batch["selfies_attention_mask"],
             "text_input_ids": batch.get("text_input_ids"),
             "text_attention_mask": batch.get("text_attention_mask"),
-            "atom_vec": batch["atom_vec"],
-            "coordinates": batch["coordinates"], # 使用转换后的坐标
+
+            "atom_vec": batch["atom_vec"],             
+            "coordinates": batch["coordinates"],       
             "atoms_mask": batch["atoms_mask"],
+            "timesteps": batch["timesteps"],
+
             "task_type": "1d_to_3d",
-            "true_coordinates": batch["coordinates"], # 使用转换后的真实坐标
-            "true_atom_vec": batch["atom_vec"],
+            "true_coordinates": batch["true_coordinates"], 
+            "true_atom_vec": batch["true_atom_vec"],       
             "true_selfies_labels": batch["true_selfies_labels"],
             "mask_schedule_coords": mask_schedule_coords,
-            "timesteps": batch["timesteps"],
         }
 
         with accelerator.accumulate(model):
