@@ -6,11 +6,11 @@ import os
 import torch
 from rdkit import Chem
 from evaluation.jodo.rdkit_metric import eval_rdmol
-from evaluation.jodo.mose_metric import compute_intermediate_statistics, mapper, get_smiles, reconstruct_mol, MeanProperty
-from fcd_torch import FCD as FCDMetric
+# from evaluation.jodo.mose_metric import compute_intermediate_statistics, mapper, get_smiles, reconstruct_mol, MeanProperty
+# from fcd_torch import FCD as FCDMetric
 from multiprocessing import Pool
-from moses.metrics.metrics import SNNMetric, FragMetric, ScafMetric, internal_diversity, \
-    fraction_passes_filters, weight, logP, SA, QED
+# from moses.metrics.metrics import SNNMetric, FragMetric, ScafMetric, internal_diversity, \
+    # fraction_passes_filters, weight, logP, SA, QED
 from evaluation.jodo.stability import bond_list, allowed_fc_bonds, stability_bonds
 from rdkit.Geometry import Point3D
 from evaluation.jodo.bond_analyze import get_bond_order, geom_predictor, allowed_bonds, allowed_fc_bonds
@@ -246,51 +246,51 @@ def get_3D_edm_metric_batch(predict_mols, train_mols=None, dataset_name='QM9'):
     output_dict.update(rdkit_dict)
     return output_dict
 
-def get_moses_metrics(test_mols, n_jobs=1, device='cpu', batch_size=2000, ptest_pool=None, cache_path=None):
-    # compute intermediate statistics for test rdmols
-    if cache_path is not None and os.path.exists(cache_path):
-        with open(cache_path, 'rb') as f:
-            ptest = pickle.load(f)
-    else:
-        ptest = compute_intermediate_statistics(test_mols, n_jobs=n_jobs, device=device,
-                                                batch_size=batch_size, pool=ptest_pool)
-        if cache_path is not None:
-            with open(cache_path, 'wb') as f:
-                pickle.dump(ptest, f)
+# def get_moses_metrics(test_mols, n_jobs=1, device='cpu', batch_size=2000, ptest_pool=None, cache_path=None):
+#     # compute intermediate statistics for test rdmols
+#     if cache_path is not None and os.path.exists(cache_path):
+#         with open(cache_path, 'rb') as f:
+#             ptest = pickle.load(f)
+#     else:
+#         ptest = compute_intermediate_statistics(test_mols, n_jobs=n_jobs, device=device,
+#                                                 batch_size=batch_size, pool=ptest_pool)
+#         if cache_path is not None:
+#             with open(cache_path, 'wb') as f:
+#                 pickle.dump(ptest, f)
 
-    def moses_metrics(gen_mols, pool=None):
-        metrics = {}
-        if pool is None:
-            if n_jobs != 1:
-                pool = Pool(n_jobs)
-                close_pool = True
-            else:
-                pool = 1
-                close_pool = False
-        kwargs = {'n_jobs': pool, 'device': device, 'batch_size': batch_size}
-        kwargs_fcd = {'n_jobs': n_jobs, 'device': device, 'batch_size': batch_size}
-        gen_smiles = mapper(pool)(get_smiles, gen_mols)
-        gen_smiles = list(set(gen_smiles) - {None})
-        re_mols = mapper(pool)(reconstruct_mol, gen_smiles)
-        metrics['FCD'] = FCDMetric(**kwargs_fcd)(gen=gen_smiles, pref=ptest['FCD'])
-        metrics['SNN'] = SNNMetric(**kwargs)(gen=re_mols, pref=ptest['SNN'])
-        metrics['Frag'] = FragMetric(**kwargs)(gen=re_mols, pref=ptest['Frag'])
-        metrics['Scaf'] = ScafMetric(**kwargs)(gen=re_mols, pref=ptest['Scaf'])
-        metrics['IntDiv'] = internal_diversity(re_mols, pool, device=device)
-        metrics['Filters'] = fraction_passes_filters(re_mols, pool)
+#     def moses_metrics(gen_mols, pool=None):
+#         metrics = {}
+#         if pool is None:
+#             if n_jobs != 1:
+#                 pool = Pool(n_jobs)
+#                 close_pool = True
+#             else:
+#                 pool = 1
+#                 close_pool = False
+#         kwargs = {'n_jobs': pool, 'device': device, 'batch_size': batch_size}
+#         kwargs_fcd = {'n_jobs': n_jobs, 'device': device, 'batch_size': batch_size}
+#         gen_smiles = mapper(pool)(get_smiles, gen_mols)
+#         gen_smiles = list(set(gen_smiles) - {None})
+#         re_mols = mapper(pool)(reconstruct_mol, gen_smiles)
+#         metrics['FCD'] = FCDMetric(**kwargs_fcd)(gen=gen_smiles, pref=ptest['FCD'])
+#         metrics['SNN'] = SNNMetric(**kwargs)(gen=re_mols, pref=ptest['SNN'])
+#         metrics['Frag'] = FragMetric(**kwargs)(gen=re_mols, pref=ptest['Frag'])
+#         metrics['Scaf'] = ScafMetric(**kwargs)(gen=re_mols, pref=ptest['Scaf'])
+#         metrics['IntDiv'] = internal_diversity(re_mols, pool, device=device)
+#         metrics['Filters'] = fraction_passes_filters(re_mols, pool)
 
-        # drug properties
-        metrics['QED'] = MeanProperty(re_mols, QED, n_jobs)
-        metrics['SA'] = MeanProperty(re_mols, SA, n_jobs)
-        metrics['logP'] = MeanProperty(re_mols, logP, n_jobs)
-        metrics['weight'] = MeanProperty(re_mols, weight, n_jobs)
+#         # drug properties
+#         metrics['QED'] = MeanProperty(re_mols, QED, n_jobs)
+#         metrics['SA'] = MeanProperty(re_mols, SA, n_jobs)
+#         metrics['logP'] = MeanProperty(re_mols, logP, n_jobs)
+#         metrics['weight'] = MeanProperty(re_mols, weight, n_jobs)
 
-        if close_pool:
-            pool.close()
-            pool.join()
-        return metrics
+#         if close_pool:
+#             pool.close()
+#             pool.join()
+#         return metrics
 
-    return moses_metrics
+#     return moses_metrics
 
 
 def get_sub_geometry_metric(test_mols, dataset_info, root_path):

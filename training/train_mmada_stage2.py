@@ -228,7 +228,7 @@ def main():
         optimizer=optimizer,
         num_warmup_steps=args.lr_scheduler.params.warmup_steps,
         num_training_steps=args.training.max_train_steps,
-        min_lr_scale=args.lr_scheduler.params.get('min_lr_scale', 0.1)
+        min_lr_scale=getattr(args.lr_scheduler.params, 'min_lr_scale', 0.1)
     )
 
     model, optimizer, train_dataloader, lr_scheduler = accelerator.prepare(
@@ -240,6 +240,7 @@ def main():
         beta_start=model_config.noise_schedule_beta_start,
         beta_end=model_config.noise_schedule_beta_end,
         timesteps=model_config.diffusion_timesteps,
+        device=accelerator.device 
     )
 
     progress_bar = tqdm(
@@ -267,7 +268,7 @@ def main():
                 "true_coordinates": batch["true_coordinates"], 
                 "true_atom_vec": batch["true_atom_vec"],       
                 "true_selfies_labels": batch["true_selfies_labels"],
-                "mask_schedule_coords": mask_schedule_coords.to(accelerator.device), # 确保在正确设备
+                "mask_schedule_coords": mask_schedule_coords,
             }
 
             with accelerator.accumulate(model):

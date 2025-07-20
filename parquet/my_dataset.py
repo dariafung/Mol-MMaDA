@@ -90,6 +90,7 @@ class MolecularUnifiedDataset(IterableDataset):
                  mask_schedule_start: float, # 新增：掩码调度开始值
                  mask_schedule_end: float, # 新增：掩码调度结束值
                  selfies_mask_ratio: Optional[float] = None,
+                 atom_type_mask_prob: float = 0.15,
                  rank: int = 0,
                  world_size: int = 1,
                  shuffle: bool = True,
@@ -385,7 +386,7 @@ class MolecularUnifiedDataset(IterableDataset):
             final_batch["text_attention_mask"] = torch.empty(0, dtype=torch.long)
 
 
-        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask", "timesteps"] # 添加 timesteps
+        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask", "timesteps", "true_atom_vec", "true_coordinates"] # 添加 timesteps
         if self.include_edge_bond_dist:
             keys_to_stack.extend(["edge_type", "bond_type", "dist"])
         if self.include_rdmol2selfies:
@@ -395,17 +396,20 @@ class MolecularUnifiedDataset(IterableDataset):
             if k in batched_data and len(batched_data[k]) > 0:
                 final_batch[k] = torch.stack(batched_data[k], dim=0)
             else:
-                if k == "coordinates":
-                    final_batch[k] = torch.empty(len(batch), self.max_atoms, 3, dtype=torch.float32) # 使用 len(batch)
+                # 这个 else 块处理批次为空的边缘情况
+                if k in ["coordinates", "true_coordinates"]: # <--- 修改这里
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, 3, dtype=torch.float32)
                 elif k == "atoms_mask":
                     final_batch[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.bool)
-                elif k == "timesteps": # 针对 timesteps 添加处理
-                    final_batch[k] = torch.empty(len(batch), 1, dtype=torch.long) # timesteps 是 (batch_size, 1)
-                elif k in ["edge_type", "bond_type", "dist"]:
-                    final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.long if k != "dist" else torch.float32)
+                elif k == "timesteps":
+                    final_batch[k] = torch.empty(len(batch), 1, dtype=torch.long)
+                elif k in ["edge_type", "bond_type"]:
+                    final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.long)
+                elif k == "dist":
+                     final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.float32)
                 elif k == "rdmol2selfies":
                     final_batch[k] = torch.empty(len(batch), self.max_atoms, self.max_selfies_length, dtype=torch.float32)
-                else: # atom_vec 或其他 1D 数组
+                else: # atom_vec, true_atom_vec 或其他 1D 数组
                     final_batch[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.long)
 
         return final_batch

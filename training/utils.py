@@ -121,19 +121,20 @@ def apply_selfies_masking(
 
     return masked_selfies_ids.to(device), true_selfies_labels.to(device)
 
-def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps: int, device: Optional[torch.device] = None):
+def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps: int, device: torch.device):
     """
     Returns a noise schedule for continuous diffusion.
     """
     if name == "linear":
-        betas = torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float64)
+        betas = torch.linspace(beta_start, beta_end, timesteps, dtype=torch.float32, device=device) # <--- 添加 device
     elif name == "cosine":
         s = 0.008
-        x = torch.linspace(0, timesteps, timesteps + 1, dtype=torch.float64)
-        alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * math.pi * 0.5) ** 2
+        steps = timesteps + 1
+        x = torch.linspace(0, timesteps, steps, dtype=torch.float32, device=device) # <--- 添加 device
+        alphas_cumprod = torch.cos(((x / timesteps) + s) / (1 + s) * torch.pi * 0.5) ** 2
         alphas_cumprod = alphas_cumprod / alphas_cumprod[0]
         betas = 1 - (alphas_cumprod[1:] / alphas_cumprod[:-1])
-        betas = betas.clamp(max=0.999)
+        betas = torch.clip(betas, 0.0001, 0.9999)
     else:
         raise NotImplementedError(f"Noise schedule '{name}' not supported.")
 
@@ -145,6 +146,7 @@ def get_noise_schedule(name: str, beta_start: float, beta_end: float, timesteps:
     
     # Return a function that maps an integer timestep to alpha_bar_sqrt
     def schedule_fn(t: torch.Tensor) -> torch.Tensor:
+        t = t.to(device)
         return torch.sqrt(alphas_cumprod[t])
 
     return schedule_fn
