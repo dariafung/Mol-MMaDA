@@ -181,12 +181,13 @@ class MMadaModelLM(nn.Module):
              combined_input_ids = selfies_input_ids
              combined_attention_mask = selfies_attention_mask
         
-        # 1. 使用组合输入处理 LLM backbone
-        llm_output = self.llm_backbone(
-            input_ids=combined_input_ids,
-            attention_mask=combined_attention_mask,
-            output_hidden_states=True
-        )
+        # 1. Process SELFIES input using LLM backbone
+        with torch.no_grad():
+            llm_output = self.llm_backbone(
+                input_ids=combined_input_ids,
+                attention_mask=combined_attention_mask,
+                output_hidden_states=True
+            )
         hidden_states = llm_output.hidden_states[-1]
 
         # 从组合的 hidden_states 中提取 SELFIES 部分的上下文

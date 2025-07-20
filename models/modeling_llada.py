@@ -918,16 +918,22 @@ class LLaDALlamaBlock(LLaDABlock):
         # shape: (batch_size, seq_len, d_model)
         og_x = x
         if self._activation_checkpoint_fn is not None:
-            x = self._activation_checkpoint_fn(self.ff_norm, x)  # type: ignore
+            ff_input = self._activation_checkpoint_fn(self.ff_norm, x)  # type: ignore
         else:
-            x = self.ff_norm(x)
-        x, x_up = self.ff_proj(x), self.up_proj(x) # new add
+            ff_input = self.ff_norm(x)
+
+        gate = self.ff_proj(ff_input)
         if self._activation_checkpoint_fn is not None:
-            x = self._activation_checkpoint_fn(self.act, x)  # type: ignore
+            activated_gate = self._activation_checkpoint_fn(self.act, gate) # type: ignore
         else:
-            x = self.act(x)
-        x = x * x_up # new add
+            activated_gate = self.act(gate)
+        
+        up = self.up_proj(ff_input)
+
+        x = activated_gate * up
+        
         x = self.ff_out(x)
+        
         x = self.dropout(x)
         x = og_x + x
 
