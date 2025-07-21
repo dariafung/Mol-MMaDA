@@ -270,7 +270,7 @@ def main():
             continue
 
     # 6. 保存结果
-    output_path = "generated_3d_molecules_for_evaluation.parquet"
+    output_path = "/projects/bezp/yfeng7/data/generated_3d_molecules_for_evaluation.parquet"
     pd.DataFrame(all_generated_data).to_parquet(output_path, index=False)
     print(f"\nGeneration complete. Saved {len(all_generated_data)} molecules to: {output_path}")
 
