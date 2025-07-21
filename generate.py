@@ -214,7 +214,7 @@ def main():
     model_config = MMadaConfig(**args.model.__dict__)
     
     # 3. 加载模型权重和 Tokenizer
-    checkpoint_dir = getattr(args.experiment, 'resume_from_checkpoint', "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct/checkpoint-10000")
+    checkpoint_dir = getattr(args.experiment, 'resume_from_checkpoint', "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct/checkpoint-10000")
     model_state_dict_path = os.path.join(checkpoint_dir, "model.safetensors") 
     print(f"Loading model state dict from: {model_state_dict_path}")
 

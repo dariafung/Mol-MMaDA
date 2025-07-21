@@ -5,7 +5,7 @@ wandb:
 experiment:
     project: "mmada-training-stage2"
     name: "mmada-training-stage2-llada-instruct"
-    output_dir: "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct"
+    output_dir: "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct"
     max_train_examples_molecular: 1000
     save_every: 10000
     eval_every: 2500

@@ -2,7 +2,7 @@ from transformers import AutoTokenizer
 from selfies import get_semantic_robust_alphabet
 import os
 
-checkpoint_dir = "/media/volume/MMaDA/outputs/mmada-training-stage2-llada-instruct"
+checkpoint_dir = "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct"
 
 # 1) 基座 LLaDA tokenizer
 tok = AutoTokenizer.from_pretrained("GSAI-ML/LLaDA-8B-Instruct", trust_remote_code=True)
