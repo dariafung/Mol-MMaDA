@@ -37,12 +37,13 @@ def parse_molecular_3d_data(raw_data_dict: Dict[str, Any]) -> Any:
     注意：这里的 atom_vec_str 预期是原子符号列表的JSON字符串，例如 "[\"C\", \"O\"]"。
     """
     try:
-        # 从 JSON 字符串反序列化为 Python 列表
-        atom_vec_symbols = json.loads(raw_data_dict.get('atom_vec_str', '[]'))
-        coordinates_list = json.loads(raw_data_dict.get('coordinates_str', '[]'))
+        atom_raw = json.loads(raw_data_dict.get("atom_vec_str", "[]"))
+        coordinates_list = json.loads(raw_data_dict.get("coordinates_str", "[]"))
 
-        # 将原子符号列表转换为原子ID列表
-        atom_ids = [atom_to_id(symbol) for symbol in atom_vec_symbols]
+        atom_ids = [
+            int(x) if isinstance(x, int) or str(x).isdigit() else atom_to_id(str(x))
+            for x in atom_raw
+        ]
         
         # 将数据转换为 Numpy 数组，再转换为 PyTorch Tensor
         atom_vec_tensor = torch.tensor(atom_ids, dtype=torch.long)
@@ -262,6 +263,13 @@ class MolecularUnifiedDataset(IterableDataset):
                             
                             # 将被掩码的位置设置为 0 (通常 0 代表未知或填充原子)
                             masked_atom_vec[final_mask] = 0
+
+                            if (masked_atom_vec != 0).sum() == 0:
+                                # 找到当前分子中真实原子的索引
+                                real_idxs = (atoms_mask != 0).nonzero(as_tuple=True)[0]
+                                # 随机挑一个位置恢复原子类型
+                                rand_idx = real_idxs[ torch.randint(len(real_idxs), (1,)).item() ]
+                                masked_atom_vec[rand_idx] = padded_atom_vec[rand_idx]
 
                         sample = {
                             "id": raw_data_item.get("id", str(random.randint(0, 1000000))),

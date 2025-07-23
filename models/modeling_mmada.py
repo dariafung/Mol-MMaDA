@@ -272,17 +272,35 @@ class MMadaModelLM(nn.Module):
             losses['coords_loss'] = coords_loss
 
             # 2. 原子类型损失
+            #调试
+            if torch.isnan(predicted_atom_type_logits).any() or torch.isinf(predicted_atom_type_logits).any():
+                print(f"[DBG] step={getattr(self,'global_step',-1)}  logits NaN/Inf TRUE")
+                bad = torch.isnan(predicted_atom_type_logits) | torch.isinf(predicted_atom_type_logits)
+                print("  bad logits sample:", predicted_atom_type_logits[bad][0:5])
+            #调试
             atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
             true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1)
-            if true_atom_vec_flat.numel() > 0: # 确保至少有一个非填充原子
+            #调试
+            valid_mask = (true_atom_vec_flat != 0)          # 0 是 ignore_index
+
+            if valid_mask.sum() == 0:
+                # 整批都被 mask：给 0 损失避免 NaN
+                atom_type_loss = torch.tensor(0.0, device=coordinates.device)
+            else:
                 atom_type_loss = F.cross_entropy(
-                    atom_type_logits_flat,
-                    true_atom_vec_flat,
-                    ignore_index=0,
+                    atom_type_logits_flat[valid_mask],
+                    true_atom_vec_flat[valid_mask],
                     reduction='mean'
-                )
+    )
+            #调试
                 losses['atom_type_loss'] = atom_type_loss
 
+            #调试
+            if self.global_step % 200 == 0 and self.training:
+                print(f"[DBG] step={self.global_step}  valid_atom_type_labels="
+                    f"{valid_mask.sum().item()}/{valid_mask.numel()}")
+            #调试
+                
             # 3. SELFIES 损失
             if self.config.selfies_coeff > 0 and true_selfies_labels is not None:
                 selfies_loss = F.cross_entropy(

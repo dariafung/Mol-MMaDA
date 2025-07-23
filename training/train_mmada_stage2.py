@@ -9,7 +9,7 @@ from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
 import transformers
 import yaml
-import wandb  # <-- 1. 导入 wandb
+import wandb 
 import json
 
 # Import your model and config
@@ -17,20 +17,19 @@ from models.modeling_mmada import MMadaConfig, MMadaModelLM
 # Import your dataset
 from parquet.my_dataset import MolecularUnifiedDataset
 from models.lr_schedulers import get_scheduler
-# from training.optimizer import get_optimizer # 你的项目中可能有这个文件，如果没有，需要创建或修改
-from torch.optim import AdamW # 使用标准的 AdamW 作为备用
+# from training.optimizer import get_optimizer 
+from torch.optim import AdamW #
 from training.utils import (
     get_noise_schedule,
 )
-# --- 2. 导入评估和生成逻辑 ---
-from generate import generate_for_evaluation # 假设 generate.py 中有这个函数
-from evaluation.eval_functions import get_3D_edm_metric # 确保这个路径正确
+
+from generate import generate_for_evaluation 
+from evaluation.eval_functions import get_3D_edm_metric 
 from rdkit import Chem
 
 
 logger = get_logger(__name__)
 
-# --- 3. 添加一个辅助函数来展平配置，方便 wandb 记录 ---
 def flatten_dict(d, parent_key='', sep='.'):
     items = []
     for k, v in d.items():
@@ -42,7 +41,6 @@ def flatten_dict(d, parent_key='', sep='.'):
     return dict(items)
 
 
-# --- 4. 将评估逻辑封装成一个函数 ---
 @torch.no_grad()
 def run_periodic_evaluation(model, tokenizer, config, accelerator, global_step):
     """
@@ -254,7 +252,9 @@ def main():
         for batch in train_dataloader:
             if global_step >= args.training.max_train_steps:
                 break
-            
+            #调试
+            model.global_step = global_step
+            #调试
             model.train() # 确保在训练模式
             
             model_inputs = {
