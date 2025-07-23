@@ -10,21 +10,17 @@ from typing import Tuple, List
 from tqdm.auto import tqdm
 import gc
 
-# RDKit 导入
 from rdkit import Chem
 from rdkit.Geometry import Point3D
 
-# 本地模型和工具导入
 from models import MMadaModelLM
 from models.modeling_mmada import MMadaConfig
 
-# --- 辅助函数 ---
 
 def add_gumbel_noise(logits: torch.Tensor, temperature: float) -> torch.Tensor:
     """向 logits 添加 Gumbel 噪声以进行随机采样。"""
     if temperature == 0:
         return logits
-    # 使用高精度以保证生成质量
     logits_float64 = logits.to(torch.float64)
     noise = torch.rand_like(logits_float64)
     gumbel_noise = -torch.log(-torch.log(noise + 1e-10))
@@ -38,14 +34,11 @@ def generate_molecular_3d(
     selfies_string: str,
     device: torch.device = 'cuda',
 ) -> Tuple[torch.FloatTensor, torch.LongTensor]:
-    """
-    使用反向扩散过程从 SELFIES 字符串生成 3D 分子坐标和原子类型。
-    所有必要的超参数都从 model.config 中读取。
-    """
+
     model.eval()
     config = model.config
 
-    # 1. 准备 SELFIES 输入
+
     selfies_tokenized = tokenizer(
         selfies_string,
         return_tensors="pt",
@@ -57,7 +50,6 @@ def generate_molecular_3d(
     selfies_attention_mask = selfies_tokenized['attention_mask'].to(device)
     batch_size = selfies_input_ids.shape[0]
 
-    # 2. 初始化噪声数据 (x_T)
     current_coordinates = torch.randn(
         batch_size, config.max_atoms, config.output_atom_coords_dim,
         dtype=torch.bfloat16 if device.type == 'cuda' else torch.float32,
@@ -66,7 +58,6 @@ def generate_molecular_3d(
     current_atom_vec = torch.zeros(batch_size, config.max_atoms, dtype=torch.long, device=device)
     atoms_mask = torch.ones(batch_size, config.max_atoms, dtype=torch.bool, device=device)
 
-    # 3. 获取扩散参数
     betas = torch.linspace(
         config.noise_schedule_beta_start, config.noise_schedule_beta_end,
         config.diffusion_timesteps, dtype=torch.float32, device=device
@@ -79,11 +70,10 @@ def generate_molecular_3d(
     sampling_steps = getattr(config, 'generation_timesteps', 30)
     inference_timesteps = torch.linspace(config.diffusion_timesteps - 1, 0, sampling_steps, dtype=torch.long, device=device)
 
-    # 4. 反向扩散（去噪）循环
     for t in inference_timesteps:
         timesteps_tensor = torch.full((batch_size,), t.item(), dtype=torch.long, device=device)
 
-        # 模型前向传播，预测 x_0
+
         predicted_coordinates_x0, predicted_atom_type_logits, *_ = model.forward(
             selfies_input_ids=selfies_input_ids,
             selfies_attention_mask=selfies_attention_mask,
@@ -93,10 +83,8 @@ def generate_molecular_3d(
             timesteps=timesteps_tensor,
         )
 
-        # 应用原子掩码
         predicted_coordinates_x0 = predicted_coordinates_x0 * atoms_mask.unsqueeze(-1).float()
 
-        # DDPM 采样步骤，从 x_t 和预测的 x_0 计算 x_{t-1}
         if t > 0:
             noise_pred = (current_coordinates - sqrt_alphas_cumprod[t] * predicted_coordinates_x0) / sqrt_one_minus_alphas_cumprod[t]
             alpha_t = alphas[t]
@@ -110,7 +98,6 @@ def generate_molecular_3d(
         else:
             current_coordinates = predicted_coordinates_x0
 
-        # 采样原子类型
         temperature = getattr(config, 'generation_temperature_atom_type', 1.0)
         if temperature > 0:
             sampled_atom_types = add_gumbel_noise(predicted_atom_type_logits, temperature=temperature).argmax(dim=-1)
@@ -119,14 +106,10 @@ def generate_molecular_3d(
         
         current_atom_vec = (sampled_atom_types * atoms_mask).long()
 
-    # 清理 GPU 内存
     gc.collect()
     torch.cuda.empty_cache()
     
     return current_coordinates, current_atom_vec
-
-
-# --- RDKit 转换辅助函数 ---
 
 _PERIODIC_TABLE = Chem.GetPeriodicTable()
 
@@ -144,7 +127,6 @@ def tensors_to_rdmol(types_tensor: torch.Tensor, coords_tensor: torch.Tensor) ->
     
     atom_idx_map = {}
     for i, atomic_num in enumerate(types):
-        # 跳过填充原子（原子序数为0）或无效原子
         if not (1 <= atomic_num <= 118):
             continue
         
@@ -160,14 +142,9 @@ def tensors_to_rdmol(types_tensor: torch.Tensor, coords_tensor: torch.Tensor) ->
     return mol.GetMol()
 
 
-# --- 外部调用接口 ---
 
 @torch.no_grad()
 def generate_for_evaluation(model: MMadaModelLM, tokenizer: AutoTokenizer, prompts: List[str], device: torch.device) -> List[Chem.Mol]:
-    """
-    为评估流程设计的生成函数。
-    接收一个 prompts 列表，返回一个 RDKit Mol 对象列表。
-    """
     all_generated_rdmols = []
     model.eval()
 
@@ -179,26 +156,20 @@ def generate_for_evaluation(model: MMadaModelLM, tokenizer: AutoTokenizer, promp
                 selfies_string=selfies_prompt,
                 device=device,
             )
-            
-            # .squeeze(0) 移除批次维度
+
             rd_mol = tensors_to_rdmol(generated_atom_types.squeeze(0), generated_coords.squeeze(0))
             all_generated_rdmols.append(rd_mol)
 
         except Exception as e:
             print(f"Error during generation for SELFIES '{selfies_prompt}': {e}", flush=True)
-            all_generated_rdmols.append(None) # 如果失败，添加一个 None 占位
+            all_generated_rdmols.append(None)
 
     return all_generated_rdmols
 
-
-# --- 独立脚本运行逻辑 ---
-
 def main():
-    """当脚本被直接执行时运行此函数。"""
     device = 'cuda' if torch.cuda.is_available() else 'cpu'
     print(f"Using device: {device}")
 
-    # 1. 加载配置
     config_path = "configs/mmada_pretraining_stage2_llada_instruct.yaml"
     print(f"Loading configuration from: {config_path}")
     with open(config_path, "r") as f:
@@ -209,18 +180,14 @@ def main():
             for a, b in d.items(): setattr(self, a, Config(b) if isinstance(b, dict) else b)
     args = Config(config_dict)
     
-    # 2. 实例化模型配置
-    # 使用 `args.model.__dict__` 可以自动传递所有 model 下的参数
     model_config = MMadaConfig(**args.model.__dict__)
     
-    # 3. 加载模型权重和 Tokenizer
     checkpoint_dir = getattr(args.experiment, 'resume_from_checkpoint', "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct/checkpoint-10000")
     model_state_dict_path = os.path.join(checkpoint_dir, "model.safetensors") 
     print(f"Loading model state dict from: {model_state_dict_path}")
 
     model = MMadaModelLM(model_config)
     state_dict = safetensors.torch.load_file(model_state_dict_path, device="cpu")
-    # 自动处理 accelerate 保存的 'module.' 前缀
     new_state_dict = { (k.replace("module.", "", 1)): v.float() for k, v in state_dict.items() }
     model.load_state_dict(new_state_dict)
     model.to(device).eval()
@@ -230,7 +197,6 @@ def main():
     
     print("Model and Tokenizer loaded successfully.")
 
-    # 4. 加载用于生成的输入数据
     data_path = args.model.data_path
     print(f"Loading data to generate from: {data_path}")
     mol_df = pd.read_parquet(data_path)
@@ -238,7 +204,6 @@ def main():
 
     all_generated_data = []
 
-    # 5. 执行生成循环
     print(f"Starting 3D molecule generation for {len(selfies_list)} molecules...")
     for idx, selfies in enumerate(tqdm(selfies_list, desc="Generating 3D Molecules", unit="mol")):
         if not isinstance(selfies, str): continue
@@ -254,7 +219,6 @@ def main():
             coords_np = coords_tensor.squeeze(0).cpu().numpy()
             types_np = types_tensor.squeeze(0).cpu().numpy()
 
-            # 过滤掉填充/无效原子
             valid_mask = (types_np > 0) & (types_np <= 118)
             valid_coords = coords_np[valid_mask].tolist()
             valid_types = types_np[valid_mask].astype(int).tolist()
@@ -269,7 +233,6 @@ def main():
             print(f"Error generating for SELFIES (idx {idx}): {e}", flush=True)
             continue
 
-    # 6. 保存结果
     output_path = "/projects/bezp/yfeng7/data/generated_3d_molecules_for_evaluation.parquet"
     pd.DataFrame(all_generated_data).to_parquet(output_path, index=False)
     print(f"\nGeneration complete. Saved {len(all_generated_data)} molecules to: {output_path}")

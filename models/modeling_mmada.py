@@ -9,7 +9,6 @@ from .common_modules import MLP, SinusoidalPositionalEmbedding
 # from training.utils import get_mask_schedule # Not used in this file
 
 
-# --- 1. MMadaConfig 类 (保持不变) ---
 class MMadaConfig(PretrainedConfig):
     model_type = "mmada"
 
@@ -19,7 +18,7 @@ class MMadaConfig(PretrainedConfig):
         llm_config_path: str = "llada-8b-instruct",
         llm_model_name_or_path: str = None,
 
-        # Molecular 3D Encoder (原有的 Molecular3DEncoder 参数)
+        # Molecular 3D Encoder
         mol_atom_embedding_dim: int = 128,
         mol_coord_embedding_dim: int = 128,
         mol_3d_encoder_output_dim: int = 768, # Should match LLM hidden size or be projected
@@ -29,7 +28,7 @@ class MMadaConfig(PretrainedConfig):
         output_atom_coords_dim: int = 3, # x, y, z coordinates
         output_atom_type_dim: int = 120, # Number of atom types for classification
 
-        # Fusion network parameters (原有的融合网络参数)
+        # Fusion network parameters 
         d_model: int = 768, # Typically LLM hidden size
         fusion_hidden_dim: int = 2048,
         final_condition_dim: int = 768,
@@ -42,9 +41,9 @@ class MMadaConfig(PretrainedConfig):
         # Loss coefficients for molecular and other tasks
         coords_coeff: float = 1.0,
         atom_type_coeff: float = 1.0,
-        selfies_coeff: float = 0.0,  # SELFIES预测损失系数
-        alignment_coeff: float = 0.0, # 对齐损失系数
-        hierarchical_coeff: float = 0.0, # 分层对齐损失系数
+        selfies_coeff: float = 1.0, 
+        alignment_coeff: float = 1.0, 
+        hierarchical_coeff: float = 0.0, 
 
         # Masking parameters for discrete diffusion
         mask_token_id: int = -1, # To be set by tokenizer vocab size + 1
@@ -83,8 +82,6 @@ class MMadaConfig(PretrainedConfig):
         self.mask_schedule_start = mask_schedule_start
         self.mask_schedule_end = mask_schedule_end
 
-
-# --- 2. Molecular3DEncoder 类 (保持不变) ---
 class Molecular3DEncoder(nn.Module):
     def __init__(self, config: MMadaConfig):
         super().__init__()
@@ -129,9 +126,6 @@ class MMadaModelLM(nn.Module):
         self.config = config
 
         self.llm_backbone = LLaDAModelLM.from_pretrained(config.llm_model_name_or_path)
-        # self.llm_backbone.eval() # 保持模型可训练，以便未来进行端到端微调
-        # for param in self.llm_backbone.parameters():
-        #     param.requires_grad = False # 暂时冻结
 
         self.molecular_3d_encoder = Molecular3DEncoder(config)
 
@@ -157,7 +151,6 @@ class MMadaModelLM(nn.Module):
         else:
             self.mol_embed_projection_for_alignment = nn.Identity()
 
-    # --- 修改 forward 函数签名 ---
     def forward(
         self,
         selfies_input_ids: torch.LongTensor,
@@ -165,16 +158,13 @@ class MMadaModelLM(nn.Module):
         atom_vec: torch.LongTensor,
         coordinates: torch.FloatTensor,
         atoms_mask: torch.BoolTensor,
-        text_input_ids: Optional[torch.LongTensor] = None,      # <--- 修改这里：添加 = None
-        text_attention_mask: Optional[torch.LongTensor] = None, # <--- 修改这里：添加 = None
+        text_input_ids: Optional[torch.LongTensor] = None,     
+        text_attention_mask: Optional[torch.LongTensor] = None, 
         timesteps: Optional[torch.LongTensor] = None,
         **kwargs,
     ) -> Tuple[torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor, torch.FloatTensor]:
         
-        # --- 如果文本输入存在，则与 SELFIES 拼接 ---
         if text_input_ids is not None and text_attention_mask is not None:
-             # 注意：这里的拼接逻辑可能需要根据你的提示工程进行调整
-             # 简单的拼接示例：
              combined_input_ids = torch.cat([selfies_input_ids, text_input_ids], dim=1)
              combined_attention_mask = torch.cat([selfies_attention_mask, text_attention_mask], dim=1)
         else:
@@ -190,8 +180,6 @@ class MMadaModelLM(nn.Module):
             )
         hidden_states = llm_output.hidden_states[-1]
 
-        # 从组合的 hidden_states 中提取 SELFIES 部分的上下文
-        # 我们只使用 SELFIES 部分的 hidden states 进行平均池化
         selfies_len = selfies_input_ids.shape[1]
         selfies_hidden_states = hidden_states[:, :selfies_len, :]
         selfies_context_embeds = (selfies_hidden_states * selfies_attention_mask.unsqueeze(-1).float()).sum(dim=1) / \
@@ -211,12 +199,10 @@ class MMadaModelLM(nn.Module):
         predicted_atom_type_logits = self.atom_type_prediction_head(final_condition_embeds) \
                 .view(B, self.config.max_atoms, self.config.output_atom_type_dim)
 
-        # SELFIES 预测的 logits 仍然来自原始 LLM 输出的 SELFIES 部分
         selfies_logits = llm_output.logits[:, :selfies_len, :]
         
         return predicted_coordinates, predicted_atom_type_logits, selfies_logits, selfies_context_embeds, mol_3d_embeds, per_atom_features
 
-    # --- 修改 forward_process 函数签名 ---
     def forward_process(
         self,
         selfies_input_ids: torch.LongTensor,
@@ -228,8 +214,8 @@ class MMadaModelLM(nn.Module):
         true_coordinates: torch.FloatTensor,
         true_atom_vec: torch.LongTensor,
         mask_schedule_coords: Callable,
-        text_input_ids: Optional[torch.LongTensor] = None,      # <--- 修改这里：添加 = None
-        text_attention_mask: Optional[torch.LongTensor] = None, # <--- 修改这里：添加 = None
+        text_input_ids: Optional[torch.LongTensor] = None,  
+        text_attention_mask: Optional[torch.LongTensor] = None, 
         true_selfies_labels: Optional[torch.LongTensor] = None,
         timesteps: Optional[torch.LongTensor] = None,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
@@ -243,7 +229,6 @@ class MMadaModelLM(nn.Module):
         timesteps = timesteps.view(-1)
         noise = torch.randn_like(coordinates) * atoms_mask.unsqueeze(-1).float()
         
-        # get_noise_schedule 返回的是一个函数，需要调用它
         alphas_bar_sqrt = mask_schedule_coords(timesteps).unsqueeze(-1).unsqueeze(-1)
         one_minus_alphas_bar_sqrt = (1.0 - alphas_bar_sqrt**2).sqrt()
 
@@ -263,7 +248,6 @@ class MMadaModelLM(nn.Module):
         )
 
         if task_type == '1d_to_3d':
-            # 1. 坐标损失
             coords_loss = F.mse_loss(
                 predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
                 true_coordinates * atoms_mask.unsqueeze(-1).float(),
@@ -271,37 +255,11 @@ class MMadaModelLM(nn.Module):
             ) / (atoms_mask.sum().float() + 1e-5)
             losses['coords_loss'] = coords_loss
 
-            # 2. 原子类型损失
-            #调试
-            if torch.isnan(predicted_atom_type_logits).any() or torch.isinf(predicted_atom_type_logits).any():
-                print(f"[DBG] step={getattr(self,'global_step',-1)}  logits NaN/Inf TRUE")
-                bad = torch.isnan(predicted_atom_type_logits) | torch.isinf(predicted_atom_type_logits)
-                print("  bad logits sample:", predicted_atom_type_logits[bad][0:5])
-            #调试
             atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
             true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1)
-            #调试
-            valid_mask = (true_atom_vec_flat != 0)          # 0 是 ignore_index
 
-            if valid_mask.sum() == 0:
-                # 整批都被 mask：给 0 损失避免 NaN
-                atom_type_loss = torch.tensor(0.0, device=coordinates.device)
-            else:
-                atom_type_loss = F.cross_entropy(
-                    atom_type_logits_flat[valid_mask],
-                    true_atom_vec_flat[valid_mask],
-                    reduction='mean'
-    )
-            #调试
                 losses['atom_type_loss'] = atom_type_loss
 
-            #调试
-            if self.global_step % 200 == 0 and self.training:
-                print(f"[DBG] step={self.global_step}  valid_atom_type_labels="
-                    f"{valid_mask.sum().item()}/{valid_mask.numel()}")
-            #调试
-                
-            # 3. SELFIES 损失
             if self.config.selfies_coeff > 0 and true_selfies_labels is not None:
                 selfies_loss = F.cross_entropy(
                     selfies_logits.reshape(-1, selfies_logits.size(-1)),
@@ -311,7 +269,6 @@ class MMadaModelLM(nn.Module):
                 )
                 losses['selfies_loss'] = selfies_loss
 
-            # 4. 对齐损失
             if self.config.alignment_coeff > 0:
                 projected_mol_embeds = self.mol_embed_projection_for_alignment(mol_3d_embeds)
                 alignment_loss = F.mse_loss(selfies_context_embeds, projected_mol_embeds)
@@ -319,7 +276,6 @@ class MMadaModelLM(nn.Module):
 
         total_loss = torch.tensor(0.0, device=coordinates.device)
         if not losses:
-            # 返回一个零损失和空字典，而不是报错，这样训练可以继续
             return total_loss, {}
 
         for loss_name, loss_value in losses.items():

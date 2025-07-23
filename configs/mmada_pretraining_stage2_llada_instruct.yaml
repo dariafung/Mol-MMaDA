@@ -15,7 +15,7 @@ experiment:
 
 model:
         dataset_type: molecular 
-        data_path: "/projects/bezp/yfeng7/data/m3_molecular_data.parquet" # 确保这个路径指向您的实际分子数据文件
+        data_path: "/projects/bezp/yfeng7/data/m3_molecular_data.parquet" 
         max_selfies_length: 256 
         max_atoms: 128
         include_edge_bond_dist: True 
@@ -53,11 +53,11 @@ model:
         atom_type_coeff: 1.0
         selfies_coeff: 1.0 
         alignment_coeff: 1.0
-        hierarchical_coeff: 0.0 # 根据您的决定，目前保持为 0.0
+        hierarchical_coeff: 0.0 
 
-        mask_token_id: -1 # train_mmada_stage2.py 中的代码会尝试从 tokenizer 获取正确的值
+        mask_token_id: -1 
         mask_replace_ratio: 0.1 
-        mask_schedule_name: "linear" # 这是用于离散掩码调度的名称
+        mask_schedule_name: "linear" 
         mask_schedule_start: 0.0001
         mask_schedule_end: 0.02
 
@@ -91,7 +91,7 @@ lr_scheduler:
 training:
     gradient_accumulation_steps: 8
     noise_type: "mask"
-    batch_size: 1 # 这是 per_device_train_batch_size
+    batch_size: 1 # per_device_train_batch_size
     mixed_precision: "bf16"
     enable_tf32: True
     seed: 10086

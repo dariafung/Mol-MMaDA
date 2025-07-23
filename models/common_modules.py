@@ -367,19 +367,15 @@ class MLP(nn.Module):
             raise ValueError("num_layers for MLP must be at least 1.")
 
         if num_layers == 1:
-            # 如果只有一层，直接从 input_dim 到 output_dim
             self.layers.append(nn.Linear(input_dim, output_dim))
         else:
-            # 第一层：从 input_dim 到 hidden_dim
             self.layers.append(nn.Linear(input_dim, hidden_dim))
-            self.layers.append(nn.ReLU()) # 或其他激活函数，如 nn.SiLU()
+            self.layers.append(nn.ReLU())
 
-            # 中间层：从 hidden_dim 到 hidden_dim
-            for _ in range(num_layers - 2): # 循环 num_layers - 2 次，处理中间层
+            for _ in range(num_layers - 2): 
                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-                self.layers.append(nn.ReLU()) # 或其他激活函数
+                self.layers.append(nn.ReLU()) 
 
-            # 最后一层：从 hidden_dim 到 output_dim
             self.layers.append(nn.Linear(hidden_dim, output_dim))
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:

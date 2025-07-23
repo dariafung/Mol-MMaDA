@@ -70,60 +70,47 @@ if __name__ == '__main__':
     all_molecules_responses = [[] for _ in range(len(mol_data_df))] 
 
     for i, mol_data_row in enumerate(tqdm(mol_data_df.to_dict(orient='records'), desc="Processing Molecules")):
-        # 解析原始分子数据，确保 parse_molecular_3d_data 函数可用
         processed_mol_data = parse_molecular_3d_data(mol_data_row)
         if not processed_mol_data:
             print(f"Skipping row {i}: Failed to parse molecular data.")
             continue
 
-        # 将分子数据张量移动到设备
-        atom_vec = processed_mol_data["atom_vec"].to(device).unsqueeze(0) # 添加 batch 维度
-        coordinates = processed_mol_data["coordinates"].to(device).unsqueeze(0) # 添加 batch 维度
-        atoms_mask = processed_mol_data["atoms_mask"].to(device).unsqueeze(0) # 添加 batch 维度
-        selfies_input_ids_mol = processed_mol_data["selfies_input_ids"].to(device).unsqueeze(0) # 添加 batch 维度
-        selfies_attention_mask_mol = processed_mol_data["selfies_attention_mask"].to(device).unsqueeze(0) # 添加 batch 维度
-        # 注意：如果你的 parse_molecular_3d_data 返回的是没有批次维度的张量，这里需要 unsqueeze(0)
+        atom_vec = processed_mol_data["atom_vec"].to(device).unsqueeze(0) 
+        coordinates = processed_mol_data["coordinates"].to(device).unsqueeze(0) 
+        atoms_mask = processed_mol_data["atoms_mask"].to(device).unsqueeze(0) 
+        selfies_input_ids_mol = processed_mol_data["selfies_input_ids"].to(device).unsqueeze(0)
+        selfies_attention_mask_mol = processed_mol_data["selfies_attention_mask"].to(device).unsqueeze(0) 
 
-        # 为每个分子生成回答
-        for question_text in prompts_for_each_molecule: # 遍历你为每个分子准备的问题
-            # 1. 准备文本提示 token
+        for question_text in prompts_for_each_molecule: 
             question_tokenized = uni_prompting.text_tokenizer([question_text], return_tensors="pt")
             question_input_ids = question_tokenized.input_ids.to(device)
-            question_attention_mask = question_tokenized.attention_mask.to(device) # 如果需要
+            question_attention_mask = question_tokenized.attention_mask.to(device)
 
-            # 2. 构建输入 token 序列 (文本问题 + 分子 token)
-            # 格式：<|mmu|> <|som|> [SELFIES tokens] <|eom|> <|sot|> [问题 token]
-
-            # 你的模型 MMadaModelLM.mmu_generate 方法可能需要调整以直接处理这些，或者它内部会转换
-            # 这里假设 mmu_generate 可以处理这种连接方式
             input_ids_for_model = torch.cat([
-                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|mmu|>']).to(device), # MMU 任务 token
-                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|som|>']).to(device), # 分子开始 token
-                selfies_input_ids_mol, # SELFIES token
-                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|eom|>']).to(device), # 分子结束 token
-                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|sot|>']).to(device), # 文本开始 token
-                question_input_ids, # 文本问题 token
+                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|mmu|>']).to(device), 
+                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|som|>']).to(device), 
+                selfies_input_ids_mol, 
+                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|eom|>']).to(device), 
+                (torch.ones(1, 1) * uni_prompting.sptids_dict['<|sot|>']).to(device), 
+                question_input_ids, 
             ], dim=1).long()
 
-            # 3. 调用模型进行生成
             with torch.no_grad():
                 output_ids = model.mmu_generate(
-                    input_ids_for_model, # 使用新的输入序列
+                    input_ids_for_model, 
                     max_new_tokens=config.dataset.preprocessing.max_seq_length,
-                    steps=config.dataset.preprocessing.max_lm_text_length // 2, # 这个参数名称可能需要根据模型调整
-                    block_length=config.dataset.preprocessing.max_seq_length // 4 # 这个参数名称可能需要根据模型调整
+                    steps=config.dataset.preprocessing.max_lm_text_length // 2, 
+                    block_length=config.dataset.preprocessing.max_seq_length // 4 
                 )
 
-            # 4. 解码生成的文本
             generated_text = uni_prompting.text_tokenizer.batch_decode(output_ids[:, input_ids_for_model.shape[1]:], skip_special_tokens=True)[0]
 
-            # 收集回答
             all_molecules_responses[i].append(f'User: {question_text}\n Answer : {generated_text}')
 
 html_content = "<div style='font-family:Arial, sans-serif;'>"
 html_content += f"<h2 style='color:navy;'>Molecular Understanding Inference Results</h2>"
 for i, mol_responses in enumerate(all_molecules_responses):
-    if not mol_responses: # 跳过没有生成回答的分子
+    if not mol_responses: 
         continue
     html_content += f"<h3>Molecule {i+1}</h3>"
     for resp in mol_responses:
