@@ -172,7 +172,15 @@ class MMadaModelLM(nn.Module):
              combined_attention_mask = selfies_attention_mask
         
         # 1. Process SELFIES input using LLM backbone
-        with torch.no_grad():
+        freeze_llm = getattr(self.config, "freeze_llm", False)
+        if freeze_llm:
+            with torch.no_grad():
+                llm_output = self.llm_backbone(
+                    input_ids=combined_input_ids,
+                    attention_mask=combined_attention_mask,
+                    output_hidden_states=True
+                )
+        else:
             llm_output = self.llm_backbone(
                 input_ids=combined_input_ids,
                 attention_mask=combined_attention_mask,
@@ -248,6 +256,7 @@ class MMadaModelLM(nn.Module):
         )
 
         if task_type == '1d_to_3d':
+
             coords_loss = F.mse_loss(
                 predicted_coordinates * atoms_mask.unsqueeze(-1).float(),
                 true_coordinates * atoms_mask.unsqueeze(-1).float(),
@@ -257,9 +266,29 @@ class MMadaModelLM(nn.Module):
 
             atom_type_logits_flat = predicted_atom_type_logits[atoms_mask].contiguous().view(-1, self.config.num_atom_types)
             true_atom_vec_flat = true_atom_vec[atoms_mask].contiguous().view(-1)
+  
+            valid_mask = (true_atom_vec_flat != 0)          
 
-                losses['atom_type_loss'] = atom_type_loss
+            if valid_mask.sum() == 0:
+                atom_type_loss = torch.tensor(0.0, device=coordinates.device)
+            else:
+                atom_type_loss = F.cross_entropy(
+                    atom_type_logits_flat[valid_mask],
+                    true_atom_vec_flat[valid_mask],
+                    reduction='mean'
+                )
 
+            losses['atom_type_loss'] = atom_type_loss
+
+
+            if self.global_step % 200 == 0 and self.training:
+                print(f"[DBG] step={self.global_step}  valid_atom_type_labels="
+                    f"{valid_mask.sum().item()}/{valid_mask.numel()}")
+            if self.global_step % 200 == 0 and self.training:
+                valid_selfies = (true_selfies_labels != -100).sum().item()
+                print(f"[DBG] step={self.global_step}  valid_selfies_tokens={valid_selfies}/{true_selfies_labels.numel()}")
+                
+            # 3. SELFIES 损失
             if self.config.selfies_coeff > 0 and true_selfies_labels is not None:
                 selfies_loss = F.cross_entropy(
                     selfies_logits.reshape(-1, selfies_logits.size(-1)),
@@ -269,6 +298,7 @@ class MMadaModelLM(nn.Module):
                 )
                 losses['selfies_loss'] = selfies_loss
 
+            # 4. 对齐损失
             if self.config.alignment_coeff > 0:
                 projected_mol_embeds = self.mol_embed_projection_for_alignment(mol_3d_embeds)
                 alignment_loss = F.mse_loss(selfies_context_embeds, projected_mol_embeds)
@@ -276,6 +306,7 @@ class MMadaModelLM(nn.Module):
 
         total_loss = torch.tensor(0.0, device=coordinates.device)
         if not losses:
+            # 返回一个零损失和空字典，而不是报错，这样训练可以继续
             return total_loss, {}
 
         for loss_name, loss_value in losses.items():
