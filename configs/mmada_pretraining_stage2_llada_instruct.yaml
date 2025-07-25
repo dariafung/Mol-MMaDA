@@ -11,7 +11,8 @@ experiment:
     eval_every: 2500
     log_every: 10
     log_grad_norm_every: 100
-    resume_from_checkpoint: "latest"
+    checkpoints_total_limit: 5
+    resume_from_checkpoint: true
 
 model:
         dataset_type: molecular 
@@ -25,7 +26,7 @@ model:
 
         llm_config_path: "GSAI-ML/LLaDA-8B-Instruct" 
         llm_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct"
-        freeze_llm: False
+        freeze_llm: True
         w_clip_vit: False
         new_vocab_size: 134656
         llm_vocab_size: 126464

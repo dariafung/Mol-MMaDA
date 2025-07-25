@@ -1,0 +1,101 @@
+# Configuration for Chem-MMaDA Pretraining Stage 1 (Molecular and Text Understanding)
+
+# --- Model Parameters ---
+model:
+  llm_config_path: "llada-8b-instruct"
+  llm_model_name_or_path: "GSAI-ML/LLaDA-8B-Instruct" # Path to pre-trained LLM for backbone
+  freeze_llm: True
+
+  # Molecular 3D Encoder Parameters
+  mol_atom_embedding_dim: 128
+  mol_coord_embedding_dim: 128
+  mol_3d_encoder_output_dim: 768 # Should match LLM d_model or be projected
+  num_atom_types: 120 # Example: up to U, with 0 for padding (mask token ID for atoms can be 120 or 0 if 0 is used only for masking/padding)
+  max_atoms: 256 # Max atoms in a molecule
+  max_selfies_length: 256 # Max length for SELFIES sequences
+  output_atom_coords_dim: 3 # x, y, z coordinates
+  output_atom_type_dim: 120 # Number of atom types for classification (should match num_atom_types)
+
+  # Fusion network parameters
+  d_model: 4096 # Typically LLM hidden size
+  fusion_hidden_dim: 2048
+  final_condition_dim: 768
+
+  # Task specific parameters (for molecular diffusion/masking)
+  diffusion_timesteps: 1000
+  noise_schedule_beta_start: 0.0001
+  noise_schedule_beta_end: 0.02
+  noise_schedule_name: "linear" # "linear", "cosine" etc.
+
+  # Loss coefficients for molecular and other tasks
+  coords_coeff: 1.0
+  atom_type_coeff: 1.0
+  selfies_coeff: 1.0
+  alignment_coeff: 1.0
+  hierarchical_coeff: 0.0
+
+  # Masking parameters for discrete diffusion (atom types)
+  # This mask_token_id is for atom types, distinct from tokenizer's mask_token_id for text/selfies.
+  mask_token_id: 120 # Example: If atom types 1-119, 0 is padding, 120 can be the mask ID for atoms.
+  mask_replace_ratio: 0.1
+  mask_schedule_name: "linear" # linear, cosine etc.
+  mask_schedule_start: 0.0001
+  mask_schedule_end: 0.02
+
+  # Data parameters that are nested under 'model' in the train script's 'args' object
+  data_path: "/projects/bezp/yfeng7/data/m3_molecular_data.parquet" # Path to your preprocessed M3-20M Parquet file(s)
+  selfies_mask_ratio: 0.15
+  atom_type_mask_prob: 0.15
+  include_edge_bond_dist: true
+  include_rdmol2selfies: false
+
+# --- Dataset Parameters (from original `dataset` block) ---
+# Note: Some parameters like max_text_length were under dataset.preprocessing in original train_mmada.py
+# Adjusted to match `args.dataset.preprocessing.max_text_length` etc.
+dataset:
+  preprocessing:
+    max_text_length: 512 # Max length for text sequences
+  params:
+    shuffle_buffer_size: 100
+    num_workers: 8
+    pin_memory: true
+    persistent_workers: false
+
+# --- Training Parameters ---
+training:
+  max_train_steps: 100000 # Total number of training steps
+  gradient_accumulation_steps: 16 # Gradient accumulation steps
+  mixed_precision: "bf16" # "no", "fp16", "bf16"
+  batch_size: 2 # Global batch size for the single DataLoader
+  seed: 42 # Random seed for reproducibility
+  overfit_one_batch: false # Set to true to overfit on a single batch for debugging
+  max_grad_norm: 1.0
+
+# --- Optimizer Parameters ---
+optimizer:
+  name: "AdamW" # Type of optimizer (e.g., AdamW)
+  params:
+    learning_rate: 1.0e-4
+    weight_decay: 0.01
+    beta1: 0.9
+    beta2: 0.95
+    eps: 1.0e-08
+
+# --- Learning Rate Scheduler Parameters ---
+lr_scheduler:
+  scheduler: "cosine" # Type of scheduler (e.g., "cosine", "linear")
+  params:
+    warmup_steps: 2000
+    min_lr_scale: 0.1 # Minimum learning rate scale during cosine annealing
+
+# --- Experiment / Logging / Checkpointing ---
+experiment:
+  name: "chem-mmada-pretrain-stage1" # Experiment name for WandB
+  project: "Chem-MMaDA" # WandB project name
+  output_dir: "./output/chem_mmada_stage1" # Directory to save checkpoints and logs
+  log_every: 100 # Log metrics every N steps
+  eval_every: 5000 # Evaluate every N steps (for periodic evaluation)
+  save_every: 5000 # Save checkpoint every N steps
+  checkpoints_total_limit: 5 # Maximum number of checkpoints to keep
+  log_grad_norm_every: 100 # Log gradient norm every N steps (from original code, keep for compatibility if needed)
+  resume_from_checkpoint: false # Resume from latest checkpoint

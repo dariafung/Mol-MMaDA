@@ -1433,8 +1433,8 @@ class LLaDAModelLM(PreTrainedModel):
             input_embeddings=inputs_embeds,
             attention_mask=attention_mask,
             attention_bias=attention_bias,
-            past_key_values=None,
-            use_cache=False,
+            past_key_values=past_key_values,
+            use_cache=use_cache,
             output_hidden_states=output_hidden_states,
         )
 

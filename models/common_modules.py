@@ -126,7 +126,6 @@ class TimeDownsample2x(nn.Module):
 
         out = torch.reshape(out, [b, h, w, c, t])
         out = rearrange(out, "b h w c t -> b c t h w")
-        out = rearrange(out, "b h w c t -> b c t h w")
         return out
 
 
@@ -370,11 +369,11 @@ class MLP(nn.Module):
             self.layers.append(nn.Linear(input_dim, output_dim))
         else:
             self.layers.append(nn.Linear(input_dim, hidden_dim))
-            self.layers.append(nn.ReLU())
+            self.layers.append(nn.GELU())
 
             for _ in range(num_layers - 2): 
                 self.layers.append(nn.Linear(hidden_dim, hidden_dim))
-                self.layers.append(nn.ReLU()) 
+                self.layers.append(nn.GELU()) 
 
             self.layers.append(nn.Linear(hidden_dim, output_dim))
 
