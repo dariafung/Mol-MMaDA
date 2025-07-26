@@ -218,6 +218,10 @@ class MolecularUnifiedDataset(IterableDataset):
                         if atom_vec.shape[0] > self.max_atoms:
                             continue
 
+                        if coordinates.shape[0] > 0:
+                            centroid = coordinates.mean(dim=0)
+                            coordinates = coordinates - centroid
+
                         # pad atoms
                         num_atoms = atom_vec.shape[0]
                         padded_atom_vec = torch.full((self.max_atoms,), 0, dtype=torch.long)

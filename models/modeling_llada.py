@@ -26,7 +26,7 @@ import torch.backends.cuda
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import einsum
-from transformers import PreTrainedModel
+from transformers import PreTrainedModel, GenerationMixin
 from transformers.modeling_outputs import CausalLMOutputWithPast
 from transformers.models.auto import AutoModel
 from transformers.cache_utils import Cache
@@ -1385,7 +1385,7 @@ def create_model_config_from_pretrained_config(config: LLaDAConfig):
     return model_config
 
 
-class LLaDAModelLM(PreTrainedModel):
+class LLaDAModelLM(PreTrainedModel, GenerationMixin):
     """
     Extremely barebones HF model wrapper.
     """
