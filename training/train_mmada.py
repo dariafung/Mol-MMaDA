@@ -1,47 +1,47 @@
 import os
 import sys
+
 # Ensure the project root is in the path for relative imports
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
+import argparse
 import json
-import logging
-import itertools
 from pathlib import Path
-from typing import Any, Callable, Dict, List, Optional
-from omegaconf import OmegaConf 
-
-# Import Accelerator from accelerate
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, set_seed
+from typing import Dict, Optional
 
 import yaml
-import wandb 
 import torch
+import transformers
+import wandb
+from accelerate import Accelerator
+from accelerate.logging import get_logger
+from accelerate.utils import set_seed
+from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.utils.data import DataLoader
 from tqdm.auto import tqdm
-from rdkit import Chem 
-import transformers
 
 from models.modeling_mmada import MMadaModelLM, MMadaConfig
 from models.lr_schedulers import get_scheduler
-
 from parquet.my_dataset import MolecularUnifiedDataset
 from selfies import get_semantic_robust_alphabet
-from training.utils import flatten_omega_conf, get_noise_schedule
+from training.utils import get_noise_schedule
 
-# Use accelerate's logger for distributed-aware logging
 logger = get_logger(__name__)
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--config", type=str, required=True)
+    return parser.parse_args()
 
 
 def main() -> None:
     # ----------------- load yaml -----------------
-    with open("configs/mmada_pretraining_stage1_llada_instruct.yaml", "r") as f:
+    cli = parse_args()
+    with open(cli.config, "r") as f:
         cfg_dict = yaml.safe_load(f)
-
-    # Use OmegaConf directly as it's more standard and robust
     args = OmegaConf.create(cfg_dict)
 
     # ----------------- Initialize Accelerator and WandB -----------------
@@ -49,7 +49,7 @@ def main() -> None:
         mixed_precision=args.training.mixed_precision,
         log_with="wandb",
         gradient_accumulation_steps=args.training.gradient_accumulation_steps,
-        project_dir=Path(args.experiment.output_dir) / "logs", 
+        project_dir=Path(args.experiment.output_dir) / "logs",
     )
 
     if accelerator.is_local_main_process:
@@ -66,10 +66,9 @@ def main() -> None:
         )
 
     if args.training.seed is not None:
-        set_seed(args.training.seed) 
+        set_seed(args.training.seed)
 
-    import torch  
-    torch.autograd.set_detect_anomaly(True) 
+    torch.autograd.set_detect_anomaly(True)
 
     device = accelerator.device
     accelerator.print(f"Using device: {device}")
@@ -79,10 +78,8 @@ def main() -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
-    added_mask_token_to_tokenizer = False
     if tokenizer.mask_token_id is None:
         tokenizer.add_special_tokens({"mask_token": "[MASK]"})
-        added_mask_token_to_tokenizer = True
 
     selfies_alphabet = set(get_semantic_robust_alphabet())
     existing = set(tokenizer.get_vocab().keys())
@@ -118,25 +115,29 @@ def main() -> None:
         noise_schedule_beta_start=args.model.noise_schedule_beta_start,
         noise_schedule_beta_end=args.model.noise_schedule_beta_end,
         noise_schedule_name=args.model.noise_schedule_name,
-        coords_coeff=args.model.coords_coeff,
-        atom_type_coeff=args.model.atom_type_coeff,
-        selfies_coeff=args.model.selfies_coeff,
-        alignment_coeff=args.model.alignment_coeff,
-        hierarchical_coeff=args.model.hierarchical_coeff,
+
+        # Only the four active loss coefficients
+        lm_coeff=getattr(args.model, "lm_coeff", 1.0),
+        diff_coeff=getattr(args.model, "diff_coeff", 0.0),
+        mae_coeff=getattr(args.model, "mae_coeff", 0.0),
+        atom_type_coeff=getattr(args.model, "atom_type_coeff", 1.0),
+
         mask_token_id=args.model.mask_token_id,
         mask_replace_ratio=args.model.mask_replace_ratio,
         mask_schedule_name=args.model.mask_schedule_name,
         mask_schedule_start=args.model.mask_schedule_start,
         mask_schedule_end=args.model.mask_schedule_end,
+
         vocab_size=len(tokenizer),
         embedding_size=((len(tokenizer) + 127) // 128) * 128,
     )
 
-    loss_coeff = {
-        "selfies_loss":   model_cfg.selfies_coeff,
-        "coords_loss":    model_cfg.coords_coeff,
+    # For logging raw losses
+    loss_coeff: Dict[str, float] = {
+        "lm_loss": model_cfg.lm_coeff,
+        "diff_loss": model_cfg.diff_coeff,
+        "mae_loss": model_cfg.mae_coeff,
         "atom_type_loss": model_cfg.atom_type_coeff,
-        "alignment_loss": model_cfg.alignment_coeff,
     }
 
     model = MMadaModelLM(model_cfg, tokenizer=tokenizer)
@@ -144,14 +145,14 @@ def main() -> None:
     for p in model.llm_backbone.parameters():
         p.requires_grad = False
 
+    # Optionally unfreeze last k blocks of LLaDA
     k = 2
-
     inner = model.llm_backbone.model if hasattr(model.llm_backbone, "model") else model.llm_backbone
-    tr = inner.transformer 
+    tr = inner.transformer
 
-    if hasattr(tr, "blocks"):                # block_group_size == 1
+    if hasattr(tr, "blocks"):
         transformer_layers = list(tr.blocks)
-    else:                              
+    else:
         transformer_layers = [layer for g in tr.block_groups for layer in g]
 
     for layer in transformer_layers[-k:]:
@@ -159,7 +160,7 @@ def main() -> None:
             p.requires_grad = True
 
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    total     = sum(p.numel() for p in model.parameters())
+    total = sum(p.numel() for p in model.parameters())
     accelerator.print(
         f"Trainable params: {trainable/1e6:.2f} M / {total/1e6:.2f} M "
         f"({trainable/total:.2%}) — Unfrozen last {k} LLaDA blocks"
@@ -198,14 +199,13 @@ def main() -> None:
     base_lr = float(args.optimizer.params.learning_rate)
 
     backbone_trainable = [p for p in model.llm_backbone.parameters() if p.requires_grad]
-    backbone_ids       = {id(p) for p in backbone_trainable}
-    other_params       = [p for p in model.parameters()
-                            if p.requires_grad and id(p) not in backbone_ids]
+    backbone_ids = {id(p) for p in backbone_trainable}
+    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_ids]
 
     optimizer = AdamW(
         [
-            {"params": other_params,       "lr": base_lr},
-            {"params": backbone_trainable, "lr": base_lr * 2},   
+            {"params": other_params, "lr": base_lr},
+            {"params": backbone_trainable, "lr": base_lr * 2},
         ],
         weight_decay=float(args.optimizer.params.weight_decay),
     )
@@ -218,8 +218,6 @@ def main() -> None:
         min_lr_scale=getattr(args.lr_scheduler.params, "min_lr_scale", 0.1),
     )
 
-
-    # Prepare model, optimizer, dataloader, and lr_scheduler with Accelerator
     model, optimizer, dataloader, lr_scheduler = accelerator.prepare(
         model, optimizer, dataloader, lr_scheduler
     )
@@ -229,13 +227,14 @@ def main() -> None:
         beta_start=model_cfg.noise_schedule_beta_start,
         beta_end=model_cfg.noise_schedule_beta_end,
         timesteps=model_cfg.diffusion_timesteps,
-        device=accelerator.device, # Use accelerator.device
+        device=accelerator.device,
     )
 
     # ----------------- optional overfit -----------------
     if getattr(args.training, "overfit_one_batch", False):
         first_batch = next(iter(dataloader))
-        dataloader = itertools.repeat(first_batch)
+        import itertools as _itertools
+        dataloader = _itertools.repeat(first_batch)
         args.training.max_train_steps = 200
         accelerator.print("One-batch overfit mode ON | steps: 200")
 
@@ -247,17 +246,14 @@ def main() -> None:
         if ckpts:
             latest = sorted(ckpts, key=lambda x: int(x.name.split("-")[1]))[-1]
             accelerator.print(f"Resuming from {latest}")
-            # Use accelerator.load_state for distributed-friendly loading
             accelerator.load_state(latest)
-            
             meta_file = latest / "metadata.json"
             if meta_file.exists():
                 with meta_file.open() as f:
                     meta = json.load(f)
                 global_step = meta.get("global_step", 0)
 
-    # tqdm should be disabled for non-main processes
-    progress = tqdm(range(args.training.max_train_steps), disable=not accelerator.is_main_process, desc="Training") 
+    progress = tqdm(range(args.training.max_train_steps), disable=not accelerator.is_main_process, desc="Training")
 
     while global_step < args.training.max_train_steps:
         for batch in dataloader:
@@ -266,34 +262,33 @@ def main() -> None:
 
             model.train()
 
-            inputs = {k: v if isinstance(v, torch.Tensor) else v
-                      for k, v in {
-                          "selfies_input_ids": batch["selfies_input_ids"],
-                          "selfies_attention_mask": batch["selfies_attention_mask"],
-                          "atom_vec": batch["atom_vec"],
-                          "coordinates": batch["coordinates"],
-                          "atoms_mask": batch["atoms_mask"],
-                          "timesteps": batch["timesteps"],
-                          "task_type": "pretraining", 
-                          "true_coordinates": batch["true_coordinates"],
-                          "true_atom_vec": batch["true_atom_vec"],
-                          "true_selfies_labels": batch["true_selfies_labels"],
-                          "mask_schedule_coords": mask_schedule_coords,
-                          "text_input_ids": batch["text_input_ids"],
-                          "text_attention_mask": batch["text_attention_mask"],
-                          "global_step": global_step, 
-                      }.items()}
+            inputs = {
+                "selfies_input_ids": batch["selfies_input_ids"],
+                "selfies_attention_mask": batch["selfies_attention_mask"],
+                "atom_vec": batch["atom_vec"],
+                "coordinates": batch["coordinates"],
+                "atoms_mask": batch["atoms_mask"],
+                "timesteps": batch["timesteps"],
+                "task_type": "pretraining",
+                "true_coordinates": batch["true_coordinates"],
+                "true_atom_vec": batch["true_atom_vec"],
+                "true_selfies_labels": batch["true_selfies_labels"],
+                "mask_schedule_coords": mask_schedule_coords,
+                "text_input_ids": batch["text_input_ids"],
+                "text_attention_mask": batch["text_attention_mask"],
+                "global_step": global_step,
+            }
 
             with accelerator.accumulate(model):
                 total_loss, losses = model.forward_process(**inputs)
                 accelerator.backward(total_loss)
-                
+
                 if args.training.max_grad_norm is not None:
                     accelerator.clip_grad_norm_(model.parameters(), args.training.max_grad_norm)
-                
+
                 optimizer.step()
                 lr_scheduler.step()
-                optimizer.zero_grad() 
+                optimizer.zero_grad()
 
             if accelerator.is_main_process:
                 progress.update(1)
@@ -304,28 +299,28 @@ def main() -> None:
                 log_d.update({f"train/{k}": float(v.item()) for k, v in losses.items()})
 
                 for k, v in losses.items():
-                    coeff = loss_coeff.get(k, 1.0)      
-                    log_d[f"train/{k}_raw"] = float((v / coeff).item())
+                    coeff = loss_coeff.get(k, 1.0)
+                    log_d[f"train/{k}_raw"] = float((v / max(coeff, 1e-12)).item())
 
-                accelerator.log(log_d, step=global_step) 
+                accelerator.log(log_d, step=global_step)
 
                 if global_step % args.experiment.save_every == 0:
                     ckpt_dir = Path(args.experiment.output_dir) / f"checkpoint-{global_step}"
                     accelerator.save_state(str(ckpt_dir))
                     with open(ckpt_dir / "metadata.json", "w") as f:
                         json.dump({"global_step": global_step}, f)
-                    accelerator.print(f"Saved checkpoint {ckpt_dir}") 
+                    accelerator.print(f"Saved checkpoint {ckpt_dir}")
 
             global_step += 1
 
-    accelerator.wait_for_everyone() 
+    accelerator.wait_for_everyone()
 
     if accelerator.is_main_process:
         final_dir = Path(args.experiment.output_dir) / "final_checkpoint"
         accelerator.save_state(str(final_dir))
         with open(final_dir / "metadata.json", "w") as f:
             json.dump({"global_step": global_step}, f)
-        accelerator.end_training() 
+        accelerator.end_training()
 
 
 if __name__ == "__main__":

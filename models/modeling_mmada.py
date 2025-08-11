@@ -258,10 +258,13 @@ class MMadaModelLM(PreTrainedModel):
         true_selfies_labels: Optional[torch.LongTensor] = None,
         timesteps: Optional[torch.LongTensor] = None,
         global_step: Optional[int] = None,
+        **kwargs,
     ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         B = coordinates.size(0)
+        device = coordinates.device
+
         if timesteps is None:
-            timesteps = torch.randint(0, self.config.diffusion_timesteps, (B,), device=coordinates.device).long()
+            timesteps = torch.randint(0, self.config.diffusion_timesteps, (B,), device=device).long()
         timesteps = timesteps.view(-1)
 
         out = self.forward(
@@ -275,83 +278,56 @@ class MMadaModelLM(PreTrainedModel):
             output_hidden_states=True,
             return_dict=True,
         )
-        pred_coords = out["predicted_coordinates"]
-        pred_atom_logits = out["predicted_atom_type_logits"]
-        selfies_logits = out["selfies_logits"]
-        selfies_ctx = out["selfies_context_embeds"]
-        mol_embed = out["mol_3d_embeds"]
+
+        pred_coords: torch.Tensor = out["predicted_coordinates"]
+        pred_atom_logits: torch.Tensor = out["predicted_atom_type_logits"]
+        selfies_logits: torch.Tensor = out["selfies_logits"]
 
         losses: Dict[str, torch.Tensor] = {}
-        total_loss = torch.tensor(0.0, device=coordinates.device)
+        total_loss = torch.tensor(0.0, device=device)
 
-        # 1. LM loss
         if self.config.lm_coeff and true_selfies_labels is not None:
-            lm = F.cross_entropy(selfies_logits.view(-1, selfies_logits.size(-1)), true_selfies_labels.view(-1), ignore_index=-100)
-            losses["lm_loss"] = lm * self.config.lm_coeff
+            lm_loss = F.cross_entropy(
+                selfies_logits.reshape(-1, selfies_logits.size(-1)),
+                true_selfies_labels.reshape(-1),
+                ignore_index=-100
+            )
+            losses["lm_loss"] = lm_loss * self.config.lm_coeff
 
-        # 2. Invariance loss
-        if self.config.inv_coeff and true_selfies_labels is not None and self.training:
-            L = selfies_input_ids.size(1)
-            mask = (torch.rand_like(selfies_input_ids.float()) < 0.1).bool()
-            aug_ids = selfies_input_ids.masked_fill(mask, self.tokenizer.mask_token_id)
-            with torch.no_grad():
-                aug_out = self.llm_backbone(input_ids=aug_ids, attention_mask=selfies_attention_mask, output_hidden_states=False, return_dict=True)
-                lm_aug = F.cross_entropy(aug_out.logits[:, :L, :].reshape(-1, aug_out.logits.size(-1)), true_selfies_labels.view(-1), ignore_index=-100)
-                ppl0 = torch.exp(lm)
-                ppl1 = torch.exp(lm_aug)
-                inv = (torch.log1p(ppl0) - torch.log1p(ppl1)).pow(2).mean()
-            losses["inv_loss"] = inv * self.config.inv_coeff
-
-        # 3. Coordinate MSE
-        coord_mse = F.mse_loss(pred_coords * atoms_mask.unsqueeze(-1).float(), true_coordinates * atoms_mask.unsqueeze(-1).float(), reduction="sum") / (atoms_mask.sum() + 1e-5)
-        losses["coord_loss"] = coord_mse * self.config.coords_coeff
-
-        # 4. Distance loss
-        pd, pm = _pairwise_distances(pred_coords, atoms_mask)
-        td, _ = _pairwise_distances(true_coordinates, atoms_mask)
-        dist_loss = F.mse_loss(pd[pm], td[pm], reduction="mean")
-        losses["distance_loss"] = dist_loss * self.config.distance_coeff
-
-        # 5. Diffusion loss
         if self.config.diff_coeff:
-            beta_t = mask_schedule_coords(timesteps.float() / self.config.diffusion_timesteps)
-            beta_t = beta_t.clamp(0.0, 1.0)
+            sqrt_alpha_bar = mask_schedule_coords(timesteps.long()).clamp(0.0, 1.0).view(-1, 1, 1)
+            alpha_bar = (sqrt_alpha_bar ** 2).clamp(0.0, 1.0)
+            sqrt_one_minus_alpha_bar = torch.sqrt((1.0 - alpha_bar).clamp(min=1e-8))
 
-            sqrt_1m = torch.sqrt((1.0 - beta_t).clamp(min=1e-6)).view(-1,1,1)
-            sqrt_b  = torch.sqrt(beta_t.clamp(min=1e-6)).view(-1,1,1)
+            noise_gt = torch.randn_like(true_coordinates)
+            pos_0 = true_coordinates
+            pos_t = sqrt_alpha_bar * pos_0 + sqrt_one_minus_alpha_bar * noise_gt
 
-            noise_gt   = torch.randn_like(true_coordinates)
-            pos_0      = true_coordinates
-            pos_t      = pos_0 * sqrt_1m + noise_gt * sqrt_b
+            noise_pred = pred_coords - pos_t  # keep your current head behavior
+            mask3 = atoms_mask.unsqueeze(-1).float()
+            diff_mse = F.mse_loss(noise_pred * mask3, noise_gt * mask3, reduction="sum") / (mask3.sum() + 1e-5)
+            losses["diff_loss"] = diff_mse * self.config.diff_coeff
 
-            noise_pred = predicted_coordinates - pos_t
-            diff_loss  = F.mse_loss(noise_pred, noise_gt, reduction='mean')
-            losses['diff_loss'] = diff_loss * self.config.diff_coeff
 
-        # 6. MAE on props if any
-        if self.config.mae_coeff and "pred_props" in out:
-            mae = F.l1_loss(out["pred_props"], kwargs["true_props"], reduction="mean")
-            losses["mae_loss"] = mae * self.config.mae_coeff
+        if self.config.mae_coeff and ("pred_props" in out) and ("true_props" in kwargs):
+            mae_loss = F.l1_loss(out["pred_props"], kwargs["true_props"], reduction="mean")
+            losses["mae_loss"] = mae_loss * self.config.mae_coeff
 
-        # 7. Atom type loss
-        flat_p = pred_atom_logits[atoms_mask].view(-1, pred_atom_logits.size(-1))
-        flat_t = true_atom_vec[atoms_mask].view(-1)
-        if flat_t.numel():
-            at = F.cross_entropy(flat_p, flat_t)
-        else:
-            at = torch.tensor(0.0, device=coordinates.device)
-        losses["atom_type_loss"] = at * self.config.atom_type_coeff
-
-        # 8. Alignment loss
-        if self.config.alignment_coeff:
-            proj = self.mol_embed_projection_for_alignment(mol_embed)
-            al = F.mse_loss(selfies_ctx, proj)
-            losses["alignment_loss"] = al * self.config.alignment_coeff
+        if self.config.atom_type_coeff:
+            valid_idx = atoms_mask
+            if valid_idx.any():
+                flat_logits = pred_atom_logits[valid_idx].view(-1, pred_atom_logits.size(-1))
+                flat_labels = true_atom_vec[valid_idx].view(-1)
+                at_loss = F.cross_entropy(flat_logits, flat_labels)
+            else:
+                at_loss = torch.tensor(0.0, device=device)
+            losses["atom_type_loss"] = at_loss * self.config.atom_type_coeff
 
         if not losses:
             return total_loss, {}
         total_loss = sum(losses.values())
         return total_loss, losses
+
 
     @torch.no_grad()
     def generate_molecule(

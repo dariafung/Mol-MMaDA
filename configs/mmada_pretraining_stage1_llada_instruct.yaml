@@ -28,16 +28,10 @@ model:
   noise_schedule_name: "linear"
 
   # Loss coefficients
-  lm_coeff:            1.0
-  inv_coeff:           1.0
-  distance_coeff:      1.0
-  coords_coeff:        1.0
-  atom_type_coeff:     1.0
-  selfies_coeff:       1.0
-  alignment_coeff:     1.0
-  diff_coeff:          0.0
-  mae_coeff:           0.0
-  hierarchical_coeff:  0.0
+  lm_coeff:        1.0
+  diff_coeff:      1.0
+  mae_coeff:       1.0
+  atom_type_coeff: 1.0
 
   # Discrete diffusion masking (atom types)
   mask_token_id: 120
