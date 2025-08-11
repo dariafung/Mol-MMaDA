@@ -138,5 +138,5 @@ if __name__ == '__main__':
     input_csv_file = "/projects/bezp/yfeng7/data/m3-20m/M^3-Datasets/M^3_Multi.csv"
     output_parquet_file = "/projects/bezp/yfeng7/data/m3_molecular_data.parquet" 
 
-    convert_m3_dataset(input_csv_file, output_parquet_file, num_rows_to_process=1000)
+    convert_m3_dataset(input_csv_file, output_parquet_file, num_rows_to_process=100000)
 

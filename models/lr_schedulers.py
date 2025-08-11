@@ -291,7 +291,7 @@ def get_scheduler(
 
     if name == SchedulerType.COSINE_WITH_RESTARTS:
         return schedule_func(
-            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, num_cycles=num_cycles, min_lr_scale=min_lr_scale
+            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, num_cycles=num_cycles
         )
 
     if name == SchedulerType.POLYNOMIAL:
@@ -299,4 +299,15 @@ def get_scheduler(
             optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, power=power
         )
 
-    return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
+    if name == SchedulerType.COSINE:
+        return schedule_func(
+            optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, min_lr_scale=min_lr_scale
+        )
+    
+    return schedule_func(
+        optimizer,
+        num_warmup_steps=num_warmup_steps,
+        num_training_steps=num_training_steps,
+    )
+
+    
