@@ -112,8 +112,8 @@ class MolecularUnifiedDataset(IterableDataset):
         self.include_edge_bond_dist = include_edge_bond_dist
         self.include_rdmol2selfies = include_rdmol2selfies
 
-        self.mask_token_id = mask_token_id          # for SELFIES masking
-        self.atom_mask_token_id = atom_mask_token_id  # for atom-type masking
+        self.mask_token_id = mask_token_id
+        self.atom_mask_token_id = atom_mask_token_id
 
         self.diffusion_timesteps = diffusion_timesteps
         self.mask_schedule_values = get_mask_schedule(
@@ -124,6 +124,8 @@ class MolecularUnifiedDataset(IterableDataset):
         )
         self.selfies_mask_ratio = selfies_mask_ratio
         self.atom_type_mask_prob = atom_type_mask_prob
+
+        self.prop_cols = ["mu", "alpha", "homo", "lumo", "gap", "cv"]
 
     def read_parquet_file(self, file_path: str) -> Iterator[Dict[str, Any]]:
         try:
@@ -138,7 +140,6 @@ class MolecularUnifiedDataset(IterableDataset):
     def __iter__(self):
         worker_info = torch.utils.data.get_worker_info()
         worker_id = worker_info.id if worker_info else 0
-        num_workers = worker_info.num_workers if worker_info else 1
 
         files_for_worker = self.files[self.rank::self.world_size]
 
@@ -162,7 +163,6 @@ class MolecularUnifiedDataset(IterableDataset):
                         if not selfies_str:
                             continue
 
-                        # Tokenize SELFIES
                         tok_selfies = self.tokenizer(
                             selfies_str,
                             truncation=True,
@@ -173,26 +173,21 @@ class MolecularUnifiedDataset(IterableDataset):
                         selfies_ids_clean = tok_selfies.input_ids[0]
                         selfies_attn_mask = tok_selfies.attention_mask[0]
 
-                        # Choose diffusion timestep
                         timestep = torch.randint(0, self.diffusion_timesteps, (1,)).item()
                         current_ratio = self.mask_schedule_values[timestep].item()
-                        # If you want to combine with selfies_mask_ratio:
                         if self.selfies_mask_ratio is not None:
                             current_ratio = self.selfies_mask_ratio
 
-                        (masked_selfies_ids,
-                         true_selfies_labels,
-                         _) = mask_or_random_replace_tokens(
+                        masked_selfies_ids, true_selfies_labels, _ = mask_or_random_replace_tokens(
                             selfies_ids_clean.unsqueeze(0),
                             self.mask_token_id,
                             mask_ratio=current_ratio,
-                            vocab_size=self.tokenizer.vocab_size,
+                            vocab_size=getattr(self.tokenizer, "vocab_size", None) or len(self.tokenizer),
                             is_train=True,
                         )
                         masked_selfies_ids = masked_selfies_ids.squeeze(0)
                         true_selfies_labels = true_selfies_labels.squeeze(0)
 
-                        # Text
                         text_str = raw.get("text_description", "")
                         if not isinstance(text_str, str):
                             text_str = ""
@@ -206,7 +201,6 @@ class MolecularUnifiedDataset(IterableDataset):
                         text_input_ids = tok_text.input_ids[0]
                         text_attention_mask = tok_text.attention_mask[0]
 
-                        # 3D data
                         mol_3d = parse_molecular_3d_data(raw)
                         if not mol_3d:
                             continue
@@ -222,7 +216,6 @@ class MolecularUnifiedDataset(IterableDataset):
                             centroid = coordinates.mean(dim=0)
                             coordinates = coordinates - centroid
 
-                        # pad atoms
                         num_atoms = atom_vec.shape[0]
                         padded_atom_vec = torch.full((self.max_atoms,), 0, dtype=torch.long)
                         padded_atom_vec[:num_atoms] = atom_vec
@@ -238,7 +231,6 @@ class MolecularUnifiedDataset(IterableDataset):
                             rand_mask = torch.rand_like(masked_atom_vec, dtype=torch.float32) < self.atom_type_mask_prob
                             final_mask = rand_mask & atoms_mask
                             masked_atom_vec[final_mask] = self.atom_mask_token_id
-                            # ensure not all masked
                             if (masked_atom_vec != self.atom_mask_token_id).sum() == 0:
                                 real_idxs = (atoms_mask != 0).nonzero(as_tuple=True)[0]
                                 ridx = real_idxs[torch.randint(len(real_idxs), (1,)).item()]
@@ -286,6 +278,18 @@ class MolecularUnifiedDataset(IterableDataset):
                             pad[:a_dim, :s_dim] = r2s[:a_dim, :s_dim]
                             sample["rdmol2selfies"] = pad
 
+                        try:
+                            props = []
+                            for c in self.prop_cols:
+                                v = raw.get(c, None)
+                                if v is None or (isinstance(v, float) and np.isnan(v)):
+                                    props.append(float("nan"))
+                                else:
+                                    props.append(float(v))
+                            sample["true_props"] = torch.tensor(props, dtype=torch.float32)
+                        except Exception:
+                            sample["true_props"] = torch.tensor([float("nan")] * len(self.prop_cols), dtype=torch.float32)
+
                         buffer.append(sample)
                         if len(buffer) >= self.buffer_size:
                             if self.shuffle:
@@ -316,7 +320,6 @@ class MolecularUnifiedDataset(IterableDataset):
 
         out: Dict[str, Any] = {}
 
-        # SELFIES
         if "selfies_input_ids" in buckets:
             padded = self.tokenizer.pad(
                 {"input_ids": buckets["selfies_input_ids"], "attention_mask": buckets["selfies_attention_mask"]},
@@ -339,7 +342,6 @@ class MolecularUnifiedDataset(IterableDataset):
         else:
             out["true_selfies_labels"] = torch.empty(0, dtype=torch.long)
 
-        # TEXT
         if "text_input_ids" in buckets:
             padded = self.tokenizer.pad(
                 {"input_ids": buckets["text_input_ids"], "attention_mask": buckets["text_attention_mask"]},
@@ -351,6 +353,15 @@ class MolecularUnifiedDataset(IterableDataset):
         else:
             out["text_input_ids"] = torch.empty(0, dtype=torch.long)
             out["text_attention_mask"] = torch.empty(0, dtype=torch.long)
+
+        if "true_props" in buckets and len(buckets["true_props"]) > 0:
+            kept = [t for t in buckets["true_props"] if isinstance(t, torch.Tensor)]
+            if len(kept) == len(buckets["true_props"]) and len(kept) > 0:
+                out["true_props"] = torch.stack(kept, dim=0).float()  # (B,6)
+            else:
+                out["true_props"] = torch.empty(len(batch), 0, dtype=torch.float32)
+        else:
+            out["true_props"] = torch.empty(len(batch), 0, dtype=torch.float32)
 
         keys_to_stack = ["atom_vec", "coordinates", "atoms_mask", "timesteps", "true_atom_vec", "true_coordinates"]
         if self.include_edge_bond_dist:
@@ -381,7 +392,7 @@ class MolecularUnifiedDataset(IterableDataset):
 
 
 if __name__ == "__main__":
-    parquet_path = "/projects/bezp/yfeng7/data/m3_molecular_data.parquet"
+    parquet_path = "/projects/bezp/yfeng7/data/qm9_molecular_data.parquet"
 
     try:
         tokenizer = AutoTokenizer.from_pretrained("GSAI-ML/LLaDA-8B-Instruct")

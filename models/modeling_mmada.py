@@ -20,67 +20,37 @@ from .modeling_llada import LLaDAModelLM
 
 
 def _pairwise_distances(coords: torch.Tensor, mask: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-    """
-    Return padded upper-triangular distance vectors per batch and a mask of valid entries.
-
-    Args:
-        coords: (B, N, 3) float – coordinates.
-        mask:   (B, N) bool   – valid-atom mask.
-
-    Returns:
-        padded:     (B, M) float – distances padded to max M in batch.
-        valid_mask: (B, M) bool  – which entries are valid.
-    """
     B, N, _ = coords.shape
     dists: List[torch.Tensor] = []
-
     for b in range(B):
-        diff = coords[b].unsqueeze(1) - coords[b].unsqueeze(0)       # (N, N, 3)
-        dist = (diff.square().sum(-1) + 1e-6).sqrt()                         # (N, N)
-        valid = mask[b].unsqueeze(1) & mask[b].unsqueeze(0)         # (N, N)
+        diff = coords[b].unsqueeze(1) - coords[b].unsqueeze(0)
+        dist = (diff.square().sum(-1) + 1e-6).sqrt()
+        valid = mask[b].unsqueeze(1) & mask[b].unsqueeze(0)
         keep = torch.triu(torch.ones_like(valid), 1).bool() & valid
-        dists.append(dist[keep])                                    # (M_b,)
-
+        dists.append(dist[keep])
     max_M = max(d.size(0) for d in dists)
     device = coords.device
-
     padded = coords.new_zeros((B, max_M))
     valid_mask = torch.zeros((B, max_M), dtype=torch.bool, device=device)
-
     for b, vec in enumerate(dists):
         m = vec.size(0)
         padded[b, :m] = vec
         valid_mask[b, :m] = True
-
     return padded, valid_mask
 
 
 def _kabsch_align(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-    """
-    Align `pred` to `gt` via Kabsch algorithm (per batch).
-
-    Args:
-        pred: (B, N, 3)
-        gt:   (B, N, 3)
-        mask: (B, N) bool
-
-    Returns:
-        aligned pred: (B, N, 3)
-    """
     B, N, _ = pred.shape
     centroid_pred = (pred * mask.unsqueeze(-1)).sum(1, keepdim=True) / (mask.sum(1, keepdim=True) + 1e-8)
     centroid_gt = (gt * mask.unsqueeze(-1)).sum(1, keepdim=True) / (mask.sum(1, keepdim=True) + 1e-8)
-
     P = pred - centroid_pred
     G = gt - centroid_gt
-
-    C = torch.matmul(P.transpose(2, 1), G)  # (B, 3, 3)
+    C = torch.matmul(P.transpose(2, 1), G)
     V, S, W = torch.svd(C)
     d = torch.det(torch.matmul(W, V.transpose(2, 1))).unsqueeze(-1).unsqueeze(-1)
     D = torch.diag_embed(torch.ones(B, 3, device=pred.device))
     D[:, -1, -1] = d.squeeze()
     R = torch.matmul(torch.matmul(W, D), V.transpose(2, 1))
-
     return torch.matmul(P, R) + centroid_gt
 
 
@@ -106,19 +76,20 @@ class MMadaConfig(PretrainedConfig):
         noise_schedule_beta_start: float = 0.0001,
         noise_schedule_beta_end: float = 0.02,
         lm_coeff: float = 1.0,
-        inv_coeff: float = 1.0,
-        distance_coeff: float = 1.0,
-        coords_coeff: float = 1.0,
+        inv_coeff: float = 0.0,
+        distance_coeff: float = 0.0,
+        coords_coeff: float = 0.0,
         diff_coeff: float = 0.0,
         mae_coeff: float = 0.0,
         atom_type_coeff: float = 1.0,
-        alignment_coeff: float = 1.0,
+        alignment_coeff: float = 0.0,
         hierarchical_coeff: float = 0.0,
         mask_token_id: int = 120,
         mask_replace_ratio: float = 0.1,
         mask_schedule_name: str = "linear",
         mask_schedule_start: float = 0.0001,
         mask_schedule_end: float = 0.02,
+        num_scalar_props: int = 6,
         **kwargs,
     ):
         super().__init__(**kwargs)
@@ -134,7 +105,9 @@ class Molecular3DEncoder(nn.Module):
         self.coord_projection = nn.Linear(config.output_atom_coords_dim, config.mol_coord_embedding_dim)
         combined_dim = config.mol_atom_embedding_dim + config.mol_coord_embedding_dim
         self.per_atom_mlp = MLP(combined_dim, combined_dim * 2, config.mol_3d_encoder_output_dim, 2)
-        self.position_embeddings = SinusoidalPositionalEmbedding(config.mol_3d_encoder_output_dim, init_range=config.max_atoms)
+        self.position_embeddings = SinusoidalPositionalEmbedding(
+            config.mol_3d_encoder_output_dim, init_range=config.max_atoms
+        )
 
     def forward(
         self,
@@ -174,12 +147,20 @@ class MMadaModelLM(PreTrainedModel):
         self.molecular_3d_encoder = Molecular3DEncoder(config)
         fusion_input_dim = config.d_model + config.mol_3d_encoder_output_dim
         self.multimodal_fusion_mlp = MLP(fusion_input_dim, config.fusion_hidden_dim, config.final_condition_dim, 2)
-        self.coordinates_prediction_head = nn.Linear(config.final_condition_dim, config.max_atoms * config.output_atom_coords_dim)
-        self.atom_type_prediction_head = nn.Linear(config.final_condition_dim, config.max_atoms * config.output_atom_type_dim)
+
+        self.coordinates_prediction_head = nn.Linear(
+            config.final_condition_dim, config.max_atoms * config.output_atom_coords_dim
+        )
+        self.atom_type_prediction_head = nn.Linear(
+            config.final_condition_dim, config.max_atoms * config.output_atom_type_dim
+        )
+        self.properties_head = nn.Linear(config.final_condition_dim, config.num_scalar_props)
+
         if config.mol_3d_encoder_output_dim != config.d_model:
             self.mol_embed_projection_for_alignment = nn.Linear(config.mol_3d_encoder_output_dim, config.d_model)
         else:
             self.mol_embed_projection_for_alignment = nn.Identity()
+
         self._init_weights()
 
     def _init_weights(self):
@@ -187,6 +168,8 @@ class MMadaModelLM(PreTrainedModel):
         nn.init.zeros_(self.coordinates_prediction_head.bias)
         nn.init.zeros_(self.atom_type_prediction_head.weight)
         nn.init.zeros_(self.atom_type_prediction_head.bias)
+        nn.init.xavier_uniform_(self.properties_head.weight)
+        nn.init.zeros_(self.properties_head.bias)
         if isinstance(self.mol_embed_projection_for_alignment, nn.Linear):
             nn.init.xavier_uniform_(self.mol_embed_projection_for_alignment.weight)
             nn.init.zeros_(self.mol_embed_projection_for_alignment.bias)
@@ -204,6 +187,13 @@ class MMadaModelLM(PreTrainedModel):
         return_dict: Optional[bool] = None,
         **kwargs,
     ) -> Dict[str, torch.Tensor]:
+        selfies_input_ids = selfies_input_ids.long()
+        selfies_attention_mask = selfies_attention_mask.long()
+        if text_input_ids is not None:
+            text_input_ids = text_input_ids.long()
+        if text_attention_mask is not None:
+            text_attention_mask = text_attention_mask.long()
+
         if text_input_ids is not None:
             input_ids = torch.cat([selfies_input_ids, text_input_ids], dim=1)
             attention_mask = torch.cat([selfies_attention_mask, text_attention_mask], dim=1)
@@ -212,29 +202,45 @@ class MMadaModelLM(PreTrainedModel):
             attention_mask = selfies_attention_mask
 
         vocab_size = self.llm_backbone.get_input_embeddings().weight.size(0)
-        for name, tensor in [("selfies_input_ids", selfies_input_ids)] + ([("text_input_ids", text_input_ids)] if text_input_ids is not None else []):
+        for name, tensor in [("selfies_input_ids", selfies_input_ids)] + (
+            [("text_input_ids", text_input_ids)] if text_input_ids is not None else []
+        ):
             if tensor is not None and (tensor >= vocab_size).any():
                 bad = tensor[tensor >= vocab_size].unique().tolist()[:5]
                 raise ValueError(f"[{name}] contains invalid token IDs >= {vocab_size}: {bad}...")
 
-        llm_out = self.llm_backbone(input_ids=input_ids, attention_mask=attention_mask, output_hidden_states=True, return_dict=True)
+        llm_out = self.llm_backbone(
+            input_ids=input_ids,
+            attention_mask=attention_mask,
+            output_hidden_states=True,
+            return_dict=True,
+        )
         hidden = llm_out.hidden_states[-1]
         selfies_len = selfies_input_ids.size(1)
         selfies_hidden = hidden[:, :selfies_len, :]
-        selfies_ctx = (selfies_hidden * selfies_attention_mask.unsqueeze(-1).float()).sum(1) / (selfies_attention_mask.sum(1, keepdim=True).float() + 1e-5)
+        selfies_ctx = (selfies_hidden * selfies_attention_mask.unsqueeze(-1).float()).sum(1) / (
+            selfies_attention_mask.sum(1, keepdim=True).float() + 1e-5
+        )
         selfies_logits = llm_out.logits[:, :selfies_len, :]
 
         mol_embed, per_atom_feats = self.molecular_3d_encoder(atom_vec, coordinates, atoms_mask)
         fused = torch.cat([selfies_ctx, mol_embed], dim=-1)
         cond = self.multimodal_fusion_mlp(fused)
+
         B = cond.size(0)
-        pred_coords = self.coordinates_prediction_head(cond).view(B, self.config.max_atoms, self.config.output_atom_coords_dim)
-        pred_atom_logits = self.atom_type_prediction_head(cond).view(B, self.config.max_atoms, self.config.output_atom_type_dim)
+        pred_coords = self.coordinates_prediction_head(cond).view(
+            B, self.config.max_atoms, self.config.output_atom_coords_dim
+        )
+        pred_atom_logits = self.atom_type_prediction_head(cond).view(
+            B, self.config.max_atoms, self.config.output_atom_type_dim
+        )
+        pred_props = self.properties_head(cond)
 
         return {
             "selfies_logits": selfies_logits,
             "predicted_coordinates": pred_coords,
             "predicted_atom_type_logits": pred_atom_logits,
+            "pred_props": pred_props,
             "selfies_context_embeds": selfies_ctx,
             "mol_3d_embeds": mol_embed,
             "per_atom_features": per_atom_feats,
@@ -282,6 +288,7 @@ class MMadaModelLM(PreTrainedModel):
         pred_coords: torch.Tensor = out["predicted_coordinates"]
         pred_atom_logits: torch.Tensor = out["predicted_atom_type_logits"]
         selfies_logits: torch.Tensor = out["selfies_logits"]
+        pred_props: torch.Tensor = out.get("pred_props", None)
 
         losses: Dict[str, torch.Tensor] = {}
         total_loss = torch.tensor(0.0, device=device)
@@ -290,7 +297,7 @@ class MMadaModelLM(PreTrainedModel):
             lm_loss = F.cross_entropy(
                 selfies_logits.reshape(-1, selfies_logits.size(-1)),
                 true_selfies_labels.reshape(-1),
-                ignore_index=-100
+                ignore_index=-100,
             )
             losses["lm_loss"] = lm_loss * self.config.lm_coeff
 
@@ -298,20 +305,23 @@ class MMadaModelLM(PreTrainedModel):
             sqrt_alpha_bar = mask_schedule_coords(timesteps.long()).clamp(0.0, 1.0).view(-1, 1, 1)
             alpha_bar = (sqrt_alpha_bar ** 2).clamp(0.0, 1.0)
             sqrt_one_minus_alpha_bar = torch.sqrt((1.0 - alpha_bar).clamp(min=1e-8))
-
             noise_gt = torch.randn_like(true_coordinates)
             pos_0 = true_coordinates
             pos_t = sqrt_alpha_bar * pos_0 + sqrt_one_minus_alpha_bar * noise_gt
-
-            noise_pred = pred_coords - pos_t  # keep your current head behavior
+            noise_pred = pred_coords - pos_t
             mask3 = atoms_mask.unsqueeze(-1).float()
             diff_mse = F.mse_loss(noise_pred * mask3, noise_gt * mask3, reduction="sum") / (mask3.sum() + 1e-5)
             losses["diff_loss"] = diff_mse * self.config.diff_coeff
 
-
-        if self.config.mae_coeff and ("pred_props" in out) and ("true_props" in kwargs):
-            mae_loss = F.l1_loss(out["pred_props"], kwargs["true_props"], reduction="mean")
-            losses["mae_loss"] = mae_loss * self.config.mae_coeff
+        if self.config.mae_coeff and (pred_props is not None) and ("true_props" in kwargs):
+            true_props: torch.Tensor = kwargs["true_props"]
+            if true_props is not None and true_props.numel() > 0:
+                if true_props.dim() == 1:
+                    true_props = true_props.unsqueeze(0)
+                mask = ~torch.isnan(true_props)
+                if mask.any():
+                    mae_loss = F.l1_loss(pred_props[mask], true_props[mask], reduction="mean")
+                    losses["mae_loss"] = mae_loss * self.config.mae_coeff
 
         if self.config.atom_type_coeff:
             valid_idx = atoms_mask
@@ -327,7 +337,6 @@ class MMadaModelLM(PreTrainedModel):
             return total_loss, {}
         total_loss = sum(losses.values())
         return total_loss, losses
-
 
     @torch.no_grad()
     def generate_molecule(
@@ -364,7 +373,7 @@ class MMadaModelLM(PreTrainedModel):
             import selfies as sf, rdkit.Chem as Chem
             smiles = sf.decoder(seq)
             mol = Chem.MolFromSmiles(smiles)
-        except:
+        except Exception:
             pass
         return {"selfies": seq, "smiles": smiles, "mol": mol}
 

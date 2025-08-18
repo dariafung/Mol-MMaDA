@@ -8,12 +8,11 @@ os.environ["TOKENIZERS_PARALLELISM"] = "true"
 import argparse
 import json
 from pathlib import Path
-from typing import Dict, Optional
+from typing import Dict
 
 import yaml
 import torch
 import transformers
-import wandb
 from accelerate import Accelerator
 from accelerate.logging import get_logger
 from accelerate.utils import set_seed
@@ -116,11 +115,14 @@ def main() -> None:
         noise_schedule_beta_end=args.model.noise_schedule_beta_end,
         noise_schedule_name=args.model.noise_schedule_name,
 
-        # Only the four active loss coefficients
+        # Active loss coefficients
         lm_coeff=getattr(args.model, "lm_coeff", 1.0),
         diff_coeff=getattr(args.model, "diff_coeff", 0.0),
         mae_coeff=getattr(args.model, "mae_coeff", 0.0),
         atom_type_coeff=getattr(args.model, "atom_type_coeff", 1.0),
+
+        # QM9 scalar properties (mu, alpha, homo, lumo, gap, cv)
+        num_scalar_props=6,
 
         mask_token_id=args.model.mask_token_id,
         mask_replace_ratio=args.model.mask_replace_ratio,
@@ -262,6 +264,9 @@ def main() -> None:
 
             model.train()
 
+            if model_cfg.mae_coeff > 0 and ("true_props" not in batch):
+                raise RuntimeError("mae_coeff > 0 but batch['true_props'] is missing from the dataloader output.")
+
             inputs = {
                 "selfies_input_ids": batch["selfies_input_ids"],
                 "selfies_attention_mask": batch["selfies_attention_mask"],
@@ -277,6 +282,7 @@ def main() -> None:
                 "text_input_ids": batch["text_input_ids"],
                 "text_attention_mask": batch["text_attention_mask"],
                 "global_step": global_step,
+                "true_props": batch.get("true_props", None),
             }
 
             with accelerator.accumulate(model):
@@ -297,11 +303,9 @@ def main() -> None:
                     "train/learning_rate": lr_scheduler.get_last_lr()[0],
                 }
                 log_d.update({f"train/{k}": float(v.item()) for k, v in losses.items()})
-
                 for k, v in losses.items():
                     coeff = loss_coeff.get(k, 1.0)
                     log_d[f"train/{k}_raw"] = float((v / max(coeff, 1e-12)).item())
-
                 accelerator.log(log_d, step=global_step)
 
                 if global_step % args.experiment.save_every == 0:

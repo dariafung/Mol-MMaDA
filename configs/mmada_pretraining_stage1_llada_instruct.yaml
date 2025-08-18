@@ -11,8 +11,8 @@ model:
   mol_coord_embedding_dim: 128
   mol_3d_encoder_output_dim: 768
   num_atom_types: 120
-  max_atoms: 128
-  max_selfies_length: 256
+  max_atoms: 64
+  max_selfies_length: 128
   output_atom_coords_dim: 3
   output_atom_type_dim: 120
 
@@ -27,11 +27,12 @@ model:
   noise_schedule_beta_end: 0.02
   noise_schedule_name: "linear"
 
+  num_props: 6
   # Loss coefficients
-  lm_coeff:        1.0
-  diff_coeff:      1.0
+  lm_coeff:        0.5
+  diff_coeff:      1.5
   mae_coeff:       1.0
-  atom_type_coeff: 1.0
+  atom_type_coeff: 0.1
 
   # Discrete diffusion masking (atom types)
   mask_token_id: 120
@@ -41,7 +42,7 @@ model:
   mask_schedule_end: 0.75
 
   # Data
-  data_path: "/projects/bezp/yfeng7/data/m3_molecular_data.parquet"
+  data_path: "/projects/bezp/yfeng7/data/qm9_molecular_data.parquet"
   selfies_mask_ratio: null
   atom_type_mask_prob: 0.3
   include_edge_bond_dist: true
