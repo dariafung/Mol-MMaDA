@@ -95,4 +95,4 @@ experiment:
   save_every: 5000
   checkpoints_total_limit: 5
   log_grad_norm_every: 100
-  resume_from_checkpoint: false
+  resume_from_checkpoint: "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct/final_checkpoint"
