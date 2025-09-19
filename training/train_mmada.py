@@ -1,3 +1,22 @@
+from .utils import get_noise_schedule
+from selfies import get_semantic_robust_alphabet
+from data.my_dataset import MolecularUnifiedDataset
+from models.lr_schedulers import get_scheduler
+from models.modeling_mmada import MMadaModelLM, MMadaConfig
+from tqdm.auto import tqdm
+from torch.utils.data import DataLoader
+from torch.optim import AdamW
+from omegaconf import OmegaConf
+from accelerate.utils import set_seed
+from accelerate.logging import get_logger
+from accelerate import Accelerator
+import transformers
+import torch
+import yaml
+from typing import Dict
+from pathlib import Path
+import json
+import argparse
 import os
 import sys
 
@@ -5,27 +24,6 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-import argparse
-import json
-from pathlib import Path
-from typing import Dict
-
-import yaml
-import torch
-import transformers
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import set_seed
-from omegaconf import OmegaConf
-from torch.optim import AdamW
-from torch.utils.data import DataLoader
-from tqdm.auto import tqdm
-
-from models.modeling_mmada import MMadaModelLM, MMadaConfig
-from models.lr_schedulers import get_scheduler
-from parquet.my_dataset import MolecularUnifiedDataset
-from selfies import get_semantic_robust_alphabet
-from training.utils import get_noise_schedule
 
 logger = get_logger(__name__)
 
@@ -61,7 +59,8 @@ def main() -> None:
         accelerator.init_trackers(
             project_name=args.experiment.project,
             config=flat_cfg,
-            init_kwargs={"wandb": {"name": args.experiment.name, "resume": "allow"}},
+            init_kwargs={
+                "wandb": {"name": args.experiment.name, "resume": "allow"}},
         )
 
     if args.training.seed is not None:
@@ -73,7 +72,8 @@ def main() -> None:
     accelerator.print(f"Using device: {device}")
 
     # ----------------- tokenizer -----------------
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model.llm_model_name_or_path)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        args.model.llm_model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -149,7 +149,8 @@ def main() -> None:
 
     # Optionally unfreeze last k blocks of LLaDA
     k = 2
-    inner = model.llm_backbone.model if hasattr(model.llm_backbone, "model") else model.llm_backbone
+    inner = model.llm_backbone.model if hasattr(
+        model.llm_backbone, "model") else model.llm_backbone
     tr = inner.transformer
 
     if hasattr(tr, "blocks"):
@@ -200,9 +201,11 @@ def main() -> None:
 
     base_lr = float(args.optimizer.params.learning_rate)
 
-    backbone_trainable = [p for p in model.llm_backbone.parameters() if p.requires_grad]
+    backbone_trainable = [
+        p for p in model.llm_backbone.parameters() if p.requires_grad]
     backbone_ids = {id(p) for p in backbone_trainable}
-    other_params = [p for p in model.parameters() if p.requires_grad and id(p) not in backbone_ids]
+    other_params = [p for p in model.parameters(
+    ) if p.requires_grad and id(p) not in backbone_ids]
 
     optimizer = AdamW(
         [
@@ -224,6 +227,7 @@ def main() -> None:
         model, optimizer, dataloader, lr_scheduler
     )
 
+    # schedule: returns sqrt(alpha_bar_t)
     mask_schedule_coords = get_noise_schedule(
         name=model_cfg.noise_schedule_name,
         beta_start=model_cfg.noise_schedule_beta_start,
@@ -244,7 +248,8 @@ def main() -> None:
 
     if args.experiment.resume_from_checkpoint:
         outdir = Path(args.experiment.output_dir)
-        ckpts = [d for d in outdir.iterdir() if d.name.startswith("checkpoint-")]
+        ckpts = [d for d in outdir.iterdir(
+        ) if d.name.startswith("checkpoint-")]
         if ckpts:
             latest = sorted(ckpts, key=lambda x: int(x.name.split("-")[1]))[-1]
             accelerator.print(f"Resuming from {latest}")
@@ -255,7 +260,8 @@ def main() -> None:
                     meta = json.load(f)
                 global_step = meta.get("global_step", 0)
 
-    progress = tqdm(range(args.training.max_train_steps), disable=not accelerator.is_main_process, desc="Training")
+    progress = tqdm(range(args.training.max_train_steps),
+                    disable=not accelerator.is_main_process, desc="Training")
 
     while global_step < args.training.max_train_steps:
         for batch in dataloader:
@@ -265,16 +271,31 @@ def main() -> None:
             model.train()
 
             if model_cfg.mae_coeff > 0 and ("true_props" not in batch):
-                raise RuntimeError("mae_coeff > 0 but batch['true_props'] is missing from the dataloader output.")
+                raise RuntimeError(
+                    "mae_coeff > 0 but batch['true_props'] is missing from the dataloader output.")
+
+            # ----------------- Build x_t from x_0 & t  (CRITICAL CHANGE) -----------------
+            x0 = batch["true_coordinates"].to(
+                accelerator.device)                 # [B, K, 3]
+            t = batch["timesteps"].to(
+                accelerator.device).long().view(-1)       # [B]
+            sqrt_ab = mask_schedule_coords(t).clamp(
+                0.0, 1.0).view(-1, 1, 1)     # sqrt(alpha_bar_t)
+            alpha_bar = (sqrt_ab ** 2).clamp(0.0, 1.0)
+            sqrt_one_minus_ab = torch.sqrt((1.0 - alpha_bar).clamp(min=1e-8))
+            eps = torch.randn_like(x0)
+            x_t = sqrt_ab * x0 + sqrt_one_minus_ab * \
+                eps                          # [B, K, 3]
 
             inputs = {
                 "selfies_input_ids": batch["selfies_input_ids"],
                 "selfies_attention_mask": batch["selfies_attention_mask"],
                 "atom_vec": batch["atom_vec"],
-                "coordinates": batch["coordinates"],
+                "coordinates": x_t,                               # feed x_t, not x0
                 "atoms_mask": batch["atoms_mask"],
                 "timesteps": batch["timesteps"],
                 "task_type": "pretraining",
+                # still needed for ε target
                 "true_coordinates": batch["true_coordinates"],
                 "true_atom_vec": batch["true_atom_vec"],
                 "true_selfies_labels": batch["true_selfies_labels"],
@@ -290,7 +311,8 @@ def main() -> None:
                 accelerator.backward(total_loss)
 
                 if args.training.max_grad_norm is not None:
-                    accelerator.clip_grad_norm_(model.parameters(), args.training.max_grad_norm)
+                    accelerator.clip_grad_norm_(
+                        model.parameters(), args.training.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -302,14 +324,17 @@ def main() -> None:
                     "train/total_loss": float(total_loss.item()),
                     "train/learning_rate": lr_scheduler.get_last_lr()[0],
                 }
-                log_d.update({f"train/{k}": float(v.item()) for k, v in losses.items()})
+                log_d.update({f"train/{k}": float(v.item())
+                             for k, v in losses.items()})
                 for k, v in losses.items():
                     coeff = loss_coeff.get(k, 1.0)
-                    log_d[f"train/{k}_raw"] = float((v / max(coeff, 1e-12)).item())
+                    log_d[f"train/{k}_raw"] = float(
+                        (v / max(coeff, 1e-12)).item())
                 accelerator.log(log_d, step=global_step)
 
                 if global_step % args.experiment.save_every == 0:
-                    ckpt_dir = Path(args.experiment.output_dir) / f"checkpoint-{global_step}"
+                    ckpt_dir = Path(args.experiment.output_dir) / \
+                        f"checkpoint-{global_step}"
                     accelerator.save_state(str(ckpt_dir))
                     with open(ckpt_dir / "metadata.json", "w") as f:
                         json.dump({"global_step": global_step}, f)

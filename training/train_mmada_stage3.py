@@ -1,39 +1,37 @@
+from .prompting_utils import UniversalPrompting
+from models.logging import set_verbosity_info, set_verbosity_error
+from models.lr_schedulers import get_scheduler
+from models import get_mask_schedule, MMadaModelLM
+from .utils import get_config, flatten_omega_conf, AverageMeter
+from accelerate.utils import DistributedType, set_seed
+from accelerate.logging import get_logger
+from accelerate import Accelerator
+from transformers import AutoTokenizer
+from lightning.pytorch.utilities import CombinedLoader
+from torch.optim import AdamW
+import wandb
+import torch
+import pandas as pd
+from typing import List, Union
+from pathlib import Path
+import time
+import shutil
+import math
+import logging
+import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
 
-import json
-import logging
-import math
-import shutil
-import time
-from pathlib import Path
-from typing import List, Union
-
-import pandas as pd
-import torch
-import wandb
-from torch.optim import AdamW
-from lightning.pytorch.utilities import CombinedLoader
-
-from transformers import AutoTokenizer
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, set_seed
-
-from training.utils import get_config, flatten_omega_conf, AverageMeter
-from models import get_mask_schedule, MMadaModelLM
-from models.lr_schedulers import get_scheduler
-from models.logging import set_verbosity_info, set_verbosity_error
-from training.prompting_utils import UniversalPrompting
 
 logger = get_logger(__name__, log_level="INFO")
 
 
 def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
     output_dir = config.experiment.output_dir
-    checkpoints_total_limit = config.experiment.get("checkpoints_total_limit", None)
+    checkpoints_total_limit = config.experiment.get(
+        "checkpoints_total_limit", None)
 
     if accelerator.is_main_process and checkpoints_total_limit is not None:
         checkpoints = os.listdir(output_dir)
@@ -42,7 +40,8 @@ def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
         if len(checkpoints) >= checkpoints_total_limit:
             num_to_remove = len(checkpoints) - checkpoints_total_limit + 1
             removing_checkpoints = checkpoints[0:num_to_remove]
-            logger.info(f"Removing checkpoints: {', '.join(removing_checkpoints)}")
+            logger.info(
+                f"Removing checkpoints: {', '.join(removing_checkpoints)}")
             for rm in removing_checkpoints:
                 shutil.rmtree(os.path.join(output_dir, rm))
 
@@ -56,8 +55,10 @@ def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
             state_dict=state_dict,
             safe_serialization=True
         )
-        json.dump({"global_step": global_step}, (save_path / "metadata.json").open("w+"))
-        uni_prompting.text_tokenizer.save_pretrained(save_path / "unwrapped_model")
+        json.dump({"global_step": global_step},
+                  (save_path / "metadata.json").open("w+"))
+        uni_prompting.text_tokenizer.save_pretrained(
+            save_path / "unwrapped_model")
         logger.info(f"Saved state to {save_path}")
 
 
@@ -74,7 +75,8 @@ def generate_chat_text(model, uni_prompting, accelerator, config, global_step):
     logger.info("Generating chat text...")
     model.eval()
 
-    df = pd.read_json(config.dataset.params.lm_chat_validation_jsonl, lines=True)
+    df = pd.read_json(
+        config.dataset.params.lm_chat_validation_jsonl, lines=True)
     prompts = df["question"].tolist()
     responses = [""] * len(prompts)
 
@@ -92,7 +94,8 @@ def generate_chat_text(model, uni_prompting, accelerator, config, global_step):
 
     for i, prompt in enumerate(prompts):
         original_prompt = prompt
-        prompt_with_tags = "<|start_header_id|>user<|end_header_id|>\n" + f"{prompt}" + "<eot_id><|start_header_id|>assistant<|end_header_id|>\n"
+        prompt_with_tags = "<|start_header_id|>user<|end_header_id|>\n" + \
+            f"{prompt}" + "<eot_id><|start_header_id|>assistant<|end_header_id|>\n"
         enc = uni_prompting.text_tokenizer([prompt_with_tags])["input_ids"]
         input_ids = torch.tensor(enc).to(device)
 
@@ -103,7 +106,8 @@ def generate_chat_text(model, uni_prompting, accelerator, config, global_step):
                 do_sample=False,
             )
 
-        text = uni_prompting.text_tokenizer.batch_decode(out_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
+        text = uni_prompting.text_tokenizer.batch_decode(
+            out_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
         responses[i] += text[0]
 
         html_content += f"""
@@ -117,7 +121,8 @@ def generate_chat_text(model, uni_prompting, accelerator, config, global_step):
 
     html_content += "</div>"
     model.train()
-    wandb.log({"chat_text_generation": wandb.Html(html_content)}, step=global_step)
+    wandb.log({"chat_text_generation": wandb.Html(
+        html_content)}, step=global_step)
 
 
 def main():
@@ -128,7 +133,8 @@ def main():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
 
-    config.experiment.logging_dir = str(Path(config.experiment.output_dir) / "logs")
+    config.experiment.logging_dir = str(
+        Path(config.experiment.output_dir) / "logs")
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
@@ -138,7 +144,8 @@ def main():
     )
 
     total_batch_size_per_gpu = config.training.batch_size_lm
-    total_batch_size = total_batch_size_per_gpu * accelerator.num_processes * config.training.gradient_accumulation_steps
+    total_batch_size = total_batch_size_per_gpu * \
+        accelerator.num_processes * config.training.gradient_accumulation_steps
 
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
         accelerator.state.deepspeed_plugin.deepspeed_config["train_micro_batch_size_per_gpu"] = (
@@ -171,7 +178,8 @@ def main():
             entity=config.wandb.get("entity", None),
             config_exclude_keys=[],
         )
-        wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
+        wandb_config = {k: v for k,
+                        v in flatten_omega_conf(config, resolve=True)}
         wandb_config.pop("experiment.resume_from_checkpoint")
 
         accelerator.init_trackers(
@@ -189,7 +197,8 @@ def main():
     if config.training.seed is not None:
         set_seed(config.training.seed)
 
-    tokenizer = AutoTokenizer.from_pretrained(config.model.mmada.tokenizer_path, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model.mmada.tokenizer_path, padding_side="left")
 
     uni_prompting = UniversalPrompting(
         tokenizer,
@@ -209,7 +218,8 @@ def main():
     mask_id = model.config.mask_token_id
 
     optimizer_config = config.optimizer.params
-    no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
+    no_decay = ["bias", "layer_norm.weight",
+                "mlm_ln.weight", "embeddings.weight"]
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters() if p.requires_grad and not any(nd in n for nd in no_decay)],
@@ -237,7 +247,8 @@ def main():
         ms_args = config.mask_schedule.get("params", {})
         mask_schedule = get_mask_schedule(schedule, **ms_args)
     else:
-        mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine"))
+        mask_schedule = get_mask_schedule(
+            config.training.get("mask_schedule", "cosine"))
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
@@ -268,7 +279,8 @@ def main():
     )
 
     iterables = {"lm_flow": train_dataloader_lm}
-    combined_mode = getattr(config.dataset, "combined_loader_mode", "max_size_cycle")
+    combined_mode = getattr(
+        config.dataset, "combined_loader_mode", "max_size_cycle")
     combined_dataloader = CombinedLoader(iterables, mode=combined_mode)
 
     global_step = 0
@@ -283,7 +295,8 @@ def main():
         if dirs:
             path = os.path.join(config.experiment.output_dir, dirs[-1])
             logger.info(f"Resuming from checkpoint: {path}")
-            global_step = start_step = int(os.path.basename(path).split("-")[1])
+            global_step = start_step = int(
+                os.path.basename(path).split("-")[1])
             first_epoch = global_step // num_update_steps_per_epoch
             state_file = f"{path}/unwrapped_model/pytorch_model.bin"
             if os.path.exists(state_file):
@@ -294,14 +307,17 @@ def main():
                 from transformers.modeling_utils import load_sharded_checkpoint
                 load_sharded_checkpoint(model, f'{path}/unwrapped_model/')
 
-    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+    model, optimizer, lr_scheduler = accelerator.prepare(
+        model, optimizer, lr_scheduler)
     mask_dtype = model.get_input_embeddings().weight.dtype
 
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
-    logger.info(f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
+    logger.info(
+        f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
     logger.info(f"  Total train batch size = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
+    logger.info(
+        f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
 
     @torch.no_grad()
     def prepare_inputs_and_labels_for_chat_text(
@@ -309,23 +325,27 @@ def main():
         max_seq_len: int,
         eps: float = 1e-3,
     ):
-        input_ids_lm, prompt_mask, labels_lm = uni_prompting((texts, max_seq_len), "lm_chat")
+        input_ids_lm, prompt_mask, labels_lm = uni_prompting(
+            (texts, max_seq_len), "lm_chat")
         b, l = input_ids_lm.shape
         t = torch.rand(b, device=input_ids_lm.device)
         p_mask = (1 - eps) * t + eps
         p_mask = p_mask[:, None].repeat(1, l)
 
-        masked_indices = torch.rand((b, l), device=input_ids_lm.device) < p_mask
+        masked_indices = torch.rand(
+            (b, l), device=input_ids_lm.device) < p_mask
         noisy_batch = torch.where(masked_indices, mask_id, input_ids_lm)
         noisy_batch[prompt_mask.bool()] = input_ids_lm[prompt_mask.bool()]
-        answer_lengths_lm = torch.sum((1 - prompt_mask), dim=-1, keepdim=True).repeat(1, l)
+        answer_lengths_lm = torch.sum(
+            (1 - prompt_mask), dim=-1, keepdim=True).repeat(1, l)
         return noisy_batch, labels_lm, p_mask, answer_lengths_lm
 
     batch_time_m = AverageMeter()
     data_time_m = AverageMeter()
     end = time.time()
 
-    num_train_epochs = math.ceil(config.training.max_train_steps / len(combined_dataloader))
+    num_train_epochs = math.ceil(
+        config.training.max_train_steps / len(combined_dataloader))
 
     for epoch in range(first_epoch, num_train_epochs):
         model.train()
@@ -339,7 +359,8 @@ def main():
             batch_lm = batch["lm_flow"]
             texts_lm = batch_lm.get("text", None)
             if texts_lm is None:
-                raise ValueError("ChatDataset must return 'text' in each sample.")
+                raise ValueError(
+                    "ChatDataset must return 'text' in each sample.")
 
             max_seq_len = config.dataset.preprocessing.max_seq_length
             input_ids, labels, p_mask_lm, answer_lengths_lm = prepare_inputs_and_labels_for_chat_text(
@@ -354,13 +375,15 @@ def main():
                     answer_lengths_lm=answer_lengths_lm,
                 )
 
-                avg_loss_lm = accelerator.gather(loss_lm.repeat(config.training.batch_size_lm)).mean()
+                avg_loss_lm = accelerator.gather(
+                    loss_lm.repeat(config.training.batch_size_lm)).mean()
                 loss = config.training.lm_coeff * loss_lm
 
                 accelerator.backward(loss)
 
                 if config.training.max_grad_norm is not None and accelerator.sync_gradients:
-                    accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                    accelerator.clip_grad_norm_(
+                        model.parameters(), config.training.max_grad_norm)
 
                 optimizer.step()
                 lr_scheduler.step()
@@ -377,7 +400,8 @@ def main():
 
                 if (global_step + 1) % config.experiment.log_every == 0:
                     samples_per_second_per_gpu = (
-                        config.training.gradient_accumulation_steps * total_batch_size_per_gpu / batch_time_m.val
+                        config.training.gradient_accumulation_steps *
+                        total_batch_size_per_gpu / batch_time_m.val
                     )
                     avg_masking_rate = p_mask_lm.mean()
                     logs = {
@@ -401,11 +425,13 @@ def main():
                     data_time_m.reset()
 
                 if (global_step + 1) % config.experiment.save_every == 0:
-                    save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
+                    save_checkpoint(model, config, accelerator,
+                                    global_step + 1, uni_prompting)
 
                 if ((global_step + 1) % config.experiment.generate_every == 0 or global_step == start_step) \
                         and accelerator.is_main_process:
-                    generate_chat_text(model, uni_prompting, accelerator, config, global_step + 1)
+                    generate_chat_text(model, uni_prompting,
+                                       accelerator, config, global_step + 1)
 
                 global_step += 1
 
@@ -415,7 +441,8 @@ def main():
 
     if accelerator.is_main_process:
         unwrapped = accelerator.unwrap_model(model)
-        unwrapped.save_pretrained(config.experiment.output_dir, safe_serialization=True)
+        unwrapped.save_pretrained(
+            config.experiment.output_dir, safe_serialization=True)
 
     accelerator.end_training()
 

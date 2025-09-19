@@ -1,1 +1,8 @@
-# from .mmada_grpo_trainer import DiffusionGRPOTrainer
+"""
+Mol-MMaDA Training
+
+Training scripts and utilities.
+"""
+
+# Training scripts will be imported here
+__all__ = []

@@ -4,7 +4,10 @@ from .bond_analyze import get_bond_order, geom_predictor, allowed_bonds, allowed
 from .rdkit_metric import eval_rdmol
 from rdkit.Geometry import Point3D
 import copy
-import torch
+try:
+    import torch  # optional for CPU eval
+except Exception:
+    torch = None
 
 
 bond_list = [None, Chem.rdchem.BondType.SINGLE, Chem.rdchem.BondType.DOUBLE, Chem.rdchem.BondType.TRIPLE,

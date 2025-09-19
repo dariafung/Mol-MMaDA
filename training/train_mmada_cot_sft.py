@@ -13,48 +13,42 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+from data.my_dataset import MolecularUnifiedDataset
+from .utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens, AverageMeter
+from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import DataLoader
+from models.logging import set_verbosity_info, set_verbosity_error
+from models.lr_schedulers import get_scheduler
+from .prompting_utils import UniversalPrompting
+from models import get_mask_schedule, MMadaModelLM, MMadaConfig
+from parquet import ChatDataset
+from .utils import get_config, flatten_omega_conf
+from accelerate.utils import DistributedType, set_seed
+from accelerate.logging import get_logger
+from accelerate import Accelerator
+from transformers import AutoTokenizer, AutoConfig
+from lightning.pytorch.utilities import CombinedLoader
+from torch.optim import AdamW
+import torch
+import wandb
+from omegaconf import OmegaConf
+from typing import Union
+from pathlib import Path
+import html
+import time
+import shutil
+import math
+import logging
+import pandas
+import json
 import os
 import sys
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 os.environ["TOKENIZERS_PARALLELISM"] = "true"
-import json
-import pandas
-import logging
-import math
-import shutil
-import time
-import html
-from pathlib import Path
-from typing import Union
-
-from omegaconf import OmegaConf
-import wandb
-import torch
-from torch.optim import AdamW
-from lightning.pytorch.utilities import CombinedLoader
-
-from transformers import AutoTokenizer, AutoConfig
-from accelerate import Accelerator
-from accelerate.logging import get_logger
-from accelerate.utils import DistributedType, set_seed
-
-from training.utils import get_config, flatten_omega_conf
-from parquet import ChatDataset
-from parquet.my_dataset import MolecularUnifiedDataset 
-
-from models import get_mask_schedule, MMadaModelLM, MMadaConfig
-from training.prompting_utils import UniversalPrompting
-from models.lr_schedulers import get_scheduler
-from models.logging import set_verbosity_info, set_verbosity_error
-
-from torch.utils.data import DataLoader
-from torch.utils.data.distributed import DistributedSampler
-
-from training.utils import get_config, flatten_omega_conf, mask_or_random_replace_tokens, AverageMeter
-
 
 
 logger = get_logger(__name__, log_level="INFO")
+
 
 def main():
     #########################
@@ -68,7 +62,8 @@ def main():
         torch.backends.cudnn.benchmark = True
         torch.backends.cudnn.deterministic = False
 
-    config.experiment.logging_dir = str(Path(config.experiment.output_dir) / "logs")
+    config.experiment.logging_dir = str(
+        Path(config.experiment.output_dir) / "logs")
     accelerator = Accelerator(
         gradient_accumulation_steps=config.training.gradient_accumulation_steps,
         mixed_precision=config.training.mixed_precision,
@@ -77,10 +72,11 @@ def main():
         split_batches=True,
     )
 
-    total_batch_size_per_gpu = (config.training.batch_size_lm + config.training.batch_size_mol)
+    total_batch_size_per_gpu = (
+        config.training.batch_size_lm + config.training.batch_size_mol)
     total_batch_size = (
-                (config.training.batch_size_lm + config.training.batch_size_mol)
-                * accelerator.num_processes * config.training.gradient_accumulation_steps
+        (config.training.batch_size_lm + config.training.batch_size_mol)
+        * accelerator.num_processes * config.training.gradient_accumulation_steps
     )
 
     if accelerator.distributed_type == DistributedType.DEEPSPEED:
@@ -120,7 +116,8 @@ def main():
             entity=config.wandb.get("entity", None),
             config_exclude_keys=[],
         )
-        wandb_config = {k: v for k, v in flatten_omega_conf(config, resolve=True)}
+        wandb_config = {k: v for k,
+                        v in flatten_omega_conf(config, resolve=True)}
         wandb_config.pop("experiment.resume_from_checkpoint")
 
         accelerator.init_trackers(
@@ -144,16 +141,18 @@ def main():
     #########################
     logger.info("Loading models and optimizer")
 
-    tokenizer = AutoTokenizer.from_pretrained(config.model.mmada.tokenizer_path, padding_side="left")
+    tokenizer = AutoTokenizer.from_pretrained(
+        config.model.mmada.tokenizer_path, padding_side="left")
 
     uni_prompting = UniversalPrompting(tokenizer, max_text_len=config.dataset.preprocessing.max_seq_length,
                                        special_tokens=(
                                        ),
                                        ignore_id=-100, cond_dropout_prob=config.training.cond_dropout_prob, use_reserved_token=True)
 
-    print('special tokens : \n', uni_prompting.sptids_dict)   
+    print('special tokens : \n', uni_prompting.sptids_dict)
 
-    model = MMadaModelLM.from_pretrained(config.model.mmada.pretrained_model_path, torch_dtype=torch.bfloat16).to(accelerator.device)
+    model = MMadaModelLM.from_pretrained(
+        config.model.mmada.pretrained_model_path, torch_dtype=torch.bfloat16).to(accelerator.device)
 
     mask_id = model.config.mask_token_id
 
@@ -163,7 +162,8 @@ def main():
     optimizer_config = config.optimizer.params
 
     # no decay on bias and layernorm and embedding
-    no_decay = ["bias", "layer_norm.weight", "mlm_ln.weight", "embeddings.weight"]
+    no_decay = ["bias", "layer_norm.weight",
+                "mlm_ln.weight", "embeddings.weight"]
     optimizer_grouped_parameters = [
         {
             "params": [p for n, p in model.named_parameters() if
@@ -195,7 +195,8 @@ def main():
         args = config.mask_schedule.get("params", {})
         mask_schedule = get_mask_schedule(schedule, **args)
     else:
-        mask_schedule = get_mask_schedule(config.training.get("mask_schedule", "cosine"))
+        mask_schedule = get_mask_schedule(
+            config.training.get("mask_schedule", "cosine"))
 
     lr_scheduler = get_scheduler(
         config.lr_scheduler.scheduler,
@@ -218,36 +219,37 @@ def main():
     dataset_config = config.dataset.params
 
     dataset_lm = ChatDataset(data_path=dataset_config.train_lm_shards_path_or_url,
-                                   rank=accelerator.process_index,
-                                   world_size=accelerator.num_processes,
-                                   num_workers=dataset_config.num_workers,
-                                   max_length=preproc_config.max_lm_text_length,
-                                   tokenizer=uni_prompting.text_tokenizer,
-                                   )
+                             rank=accelerator.process_index,
+                             world_size=accelerator.num_processes,
+                             num_workers=dataset_config.num_workers,
+                             max_length=preproc_config.max_lm_text_length,
+                             tokenizer=uni_prompting.text_tokenizer,
+                             )
 
     train_dataloader_lm = torch.utils.data.DataLoader(dataset_lm, batch_size=config.training.batch_size_lm,
                                                       sampler=None, collate_fn=dataset_lm.collate_fn,
                                                       num_workers=dataset_config.num_workers)
-    
+
     train_dataset_mol = MolecularUnifiedDataset(
-        data_path=dataset_config.train_mol_data_path, # 你需要在config中定义这个路径
-        tokenizer=tokenizer, # 沿用你现有的tokenizer
-        mask_token_id=model.config.mask_token_id, # 从模型config获取
+        data_path=dataset_config.train_mol_data_path,  # 你需要在config中定义这个路径
+        tokenizer=tokenizer,  # 沿用你现有的tokenizer
+        mask_token_id=model.config.mask_token_id,  # 从模型config获取
         diffusion_timesteps=model.config.diffusion_timesteps,
         mask_schedule_name=model.config.mask_schedule_name,
         mask_schedule_start=model.config.mask_schedule_start,
         mask_schedule_end=model.config.mask_schedule_end,
-        max_text_length=preproc_config.max_lm_text_length, # 文本描述长度
-        max_selfies_length=config.dataset.preprocessing.max_selfies_length, # SELFIES长度，需要在config中定义
-        max_atoms=config.model.mmada.max_atoms, # 最大原子数，需要在config中定义
+        max_text_length=preproc_config.max_lm_text_length,  # 文本描述长度
+        # SELFIES长度，需要在config中定义
+        max_selfies_length=config.dataset.preprocessing.max_selfies_length,
+        max_atoms=config.model.mmada.max_atoms,  # 最大原子数，需要在config中定义
     )
 
     train_dataloader_mol = torch.utils.data.DataLoader(
         train_dataset_mol,
-        batch_size=config.training.batch_size_mol, # 你需要在config中定义batch_size_mol
+        batch_size=config.training.batch_size_mol,  # 你需要在config中定义batch_size_mol
         collate_fn=train_dataset_mol.collate_fn,
         num_workers=dataset_config.num_workers,
-        pin_memory=True, # 如果需要
+        pin_memory=True,  # 如果需要
     )
 
     # Combine these dataloaders into a single iterable model
@@ -256,25 +258,30 @@ def main():
         "mol_flow": train_dataloader_mol,
     }
 
-    # 
-    combined_dataloader = CombinedLoader(iterables, mode=config.dataset.combined_loader_mode)
-    
+    #
+    combined_dataloader = CombinedLoader(
+        iterables, mode=config.dataset.combined_loader_mode)
+
     num_batches_per_epoch_lm = len(train_dataloader_lm)
     num_batches_per_epoch_mol = len(train_dataloader_mol)
 
     # 根据你的 config.dataset.combined_loader_mode 来决定如何合并批次总数
-    if config.dataset.combined_loader_mode == "max_size_cycle": # 根据你的实际模式调整
-        total_batches_per_epoch = max(num_batches_per_epoch_lm, num_batches_per_epoch_mol)
+    if config.dataset.combined_loader_mode == "max_size_cycle":  # 根据你的实际模式调整
+        total_batches_per_epoch = max(
+            num_batches_per_epoch_lm, num_batches_per_epoch_mol)
     elif config.dataset.combined_loader_mode == "min_size":
-        total_batches_per_epoch = min(num_batches_per_epoch_lm, num_batches_per_epoch_mol)
+        total_batches_per_epoch = min(
+            num_batches_per_epoch_lm, num_batches_per_epoch_mol)
     elif config.dataset.combined_loader_mode == "sequential":
         total_batches_per_epoch = num_batches_per_epoch_lm + num_batches_per_epoch_mol
     else:
-         # 如果有其他模式，需要相应处理，或者设置一个合理的默认值
-         total_batches_per_epoch = num_batches_per_epoch_lm + num_batches_per_epoch_mol 
+        # 如果有其他模式，需要相应处理，或者设置一个合理的默认值
+        total_batches_per_epoch = num_batches_per_epoch_lm + num_batches_per_epoch_mol
 
-    num_update_steps_per_epoch = math.ceil(total_batches_per_epoch / config.training.gradient_accumulation_steps)
-    num_train_epochs = math.ceil(config.training.max_train_steps / num_update_steps_per_epoch)
+    num_update_steps_per_epoch = math.ceil(
+        total_batches_per_epoch / config.training.gradient_accumulation_steps)
+    num_train_epochs = math.ceil(
+        config.training.max_train_steps / num_update_steps_per_epoch)
 
     ##################################
     #         MODEL RESUME          #
@@ -293,10 +300,12 @@ def main():
         if path is not None:
             path = os.path.join(config.experiment.output_dir, path)
             logger.info(f"Resuming from checkpoint: {path}")
-            global_step = start_step = int(os.path.basename(path).split("-")[1])
+            global_step = start_step = int(
+                os.path.basename(path).split("-")[1])
             first_epoch = global_step // num_update_steps_per_epoch
             if os.path.exists(f'{path}/unwrapped_model/pytorch_model.bin'):
-                state_dict = torch.load(f'{path}/unwrapped_model/pytorch_model.bin', map_location="cpu")
+                state_dict = torch.load(
+                    f'{path}/unwrapped_model/pytorch_model.bin', map_location="cpu")
                 model.load_state_dict(state_dict, strict=True)
                 del state_dict
             elif os.path.exists(f'{path}/unwrapped_model/pytorch_model.bin.index.json'):
@@ -306,11 +315,12 @@ def main():
             elif os.path.exists(f'{path}/unwrapped_model/model.safetensors.index.json'):
                 from transformers.modeling_utils import load_sharded_checkpoint
                 load_sharded_checkpoint(
-                    model, 
+                    model,
                     f'{path}/unwrapped_model/',
                 )
             else:
-                raise FileNotFoundError(f"Checkpoint {path}/unwrapped_model/pytorch_model.bin not found")
+                raise FileNotFoundError(
+                    f"Checkpoint {path}/unwrapped_model/pytorch_model.bin not found")
     else:
         logger.info("Not resuming from checkpoint")
 
@@ -318,13 +328,14 @@ def main():
     #       Prepare accelerator     #
     #################################
     logger.info("Preparing model, optimizer and dataloaders")
-    model, optimizer, lr_scheduler = accelerator.prepare(model, optimizer, lr_scheduler)
+    model, optimizer, lr_scheduler = accelerator.prepare(
+        model, optimizer, lr_scheduler)
 
     mask_dtype = model.get_input_embeddings().weight.dtype
 
-    from training.utils import get_noise_schedule # 确保这个导入在文件顶部
+    from .utils import get_noise_schedule  # 确保这个导入在文件顶部
     mask_schedule_coords = get_noise_schedule(
-        name=config.model.mmada.noise_schedule_name, # 假设在config中定义
+        name=config.model.mmada.noise_schedule_name,  # 假设在config中定义
         beta_start=config.model.mmada.noise_schedule_beta_start,
         beta_end=config.model.mmada.noise_schedule_beta_end,
         timesteps=config.model.mmada.diffusion_timesteps,
@@ -335,31 +346,36 @@ def main():
     #################################
     logger.info("***** Running training *****")
     logger.info(f"  Num training steps = {config.training.max_train_steps}")
-    logger.info(f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
-    logger.info(f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
-    logger.info(f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
+    logger.info(
+        f"  Instantaneous batch size per device = {total_batch_size_per_gpu}")
+    logger.info(
+        f"  Total train batch size (w. parallel, distributed & accumulation) = {total_batch_size}")
+    logger.info(
+        f"  Gradient Accumulation steps = {config.training.gradient_accumulation_steps}")
 
     @torch.no_grad()
     def prepare_inputs_and_labels_for_chat_text(
         texts: Union[str, list[str]], max_seq_len, eps=1e-3
     ):
         # create MLM mask and labels
-        
-        input_ids_lm, prompt_mask, labels_lm = uni_prompting((texts, max_seq_len), 'lm_chat')
+
+        input_ids_lm, prompt_mask, labels_lm = uni_prompting(
+            (texts, max_seq_len), 'lm_chat')
         b, l = input_ids_lm.shape
         t = torch.rand(b, device=input_ids_lm.device)
         p_mask = (1 - eps) * t + eps
         p_mask = p_mask[:, None].repeat(1, l)
 
-        masked_indices = torch.rand((b, l), device=input_ids_lm.device) < p_mask
+        masked_indices = torch.rand(
+            (b, l), device=input_ids_lm.device) < p_mask
         # 126336 is used for [MASK] token
         noisy_batch = torch.where(masked_indices, mask_id, input_ids_lm)
-        masked_indices = noisy_batch == mask_id 
+        masked_indices = noisy_batch == mask_id
         noisy_batch[prompt_mask.bool()] = input_ids_lm[prompt_mask.bool()]
-        masked_indices = noisy_batch == mask_id 
+        masked_indices = noisy_batch == mask_id
         answer_lengths_lm = torch.sum((1 - prompt_mask), dim=-1, keepdim=True)
         answer_lengths_lm = answer_lengths_lm.repeat(1, noisy_batch.shape[1])
-        
+
         return noisy_batch, labels_lm, p_mask, answer_lengths_lm
 
     batch_time_m = AverageMeter()
@@ -375,7 +391,8 @@ def main():
             mol_batch = batch["mol_flow"]
 
             batch_size_lm = len(lm_batch["input_ids"])
-            batch_size_mol = len(mol_batch["selfies_input_ids"]) # 或者其他适合你数据的批处理大小获取方式
+            # 或者其他适合你数据的批处理大小获取方式
+            batch_size_mol = len(mol_batch["selfies_input_ids"])
 
             data_time_m.update(time.time() - end)
 
@@ -383,31 +400,36 @@ def main():
             # 确保 prepare_inputs_and_labels_for_chat_text 已经更新，处理 lm_batch["input_ids"]
             # 它的返回值应为 (noisy_batch, labels_lm, p_mask, answer_lengths_lm)
             lm_input_ids, lm_labels, lm_p_mask, lm_answer_lengths = \
-                prepare_inputs_and_labels_for_chat_text(lm_batch["input_ids"], config.dataset.preprocessing.max_lm_text_length)
+                prepare_inputs_and_labels_for_chat_text(
+                    lm_batch["input_ids"], config.dataset.preprocessing.max_lm_text_length)
 
             # 准备传递给 MMadaModelLM.forward_process 的所有输入
             model_inputs = {
                 "selfies_input_ids": mol_batch["selfies_input_ids"],
                 "selfies_attention_mask": mol_batch["selfies_attention_mask"],
                 "atom_vec": mol_batch["atom_vec"],
-                "coordinates": mol_batch["coordinates"], # 这是原始的 x_0
+                "coordinates": mol_batch["coordinates"],  # 这是原始的 x_0
                 "atoms_mask": mol_batch["atoms_mask"],
-                "text_input_ids": lm_batch["text_input_ids"], # 假设 ChatDataset 也能提供 text_input_ids
-                "text_attention_mask": lm_batch["text_attention_mask"], # 假设 ChatDataset 也能提供 text_attention_mask
-                "timesteps": mol_batch["timesteps"], # MolecularUnifiedDataset 中生成的 timesteps
+                # 假设 ChatDataset 也能提供 text_input_ids
+                "text_input_ids": lm_batch["text_input_ids"],
+                # 假设 ChatDataset 也能提供 text_attention_mask
+                "text_attention_mask": lm_batch["text_attention_mask"],
+                # MolecularUnifiedDataset 中生成的 timesteps
+                "timesteps": mol_batch["timesteps"],
 
-                "true_coordinates": mol_batch["coordinates"], # 干净坐标，用于损失计算
-                "true_atom_vec": mol_batch["atom_vec"], # 真实原子类型，用于损失计算
-                "mask_schedule_coords": mask_schedule_coords, # 用于连续扩散的 mask schedule
-                "true_selfies_labels": mol_batch["true_selfies_labels"], # 真实SELFIES标签，用于损失计算
-                "task_type": "1d_to_3d", # 或者根据你的任务类型（可能动态设置）
+                "true_coordinates": mol_batch["coordinates"],  # 干净坐标，用于损失计算
+                "true_atom_vec": mol_batch["atom_vec"],  # 真实原子类型，用于损失计算
+                "mask_schedule_coords": mask_schedule_coords,  # 用于连续扩散的 mask schedule
+                # 真实SELFIES标签，用于损失计算
+                "true_selfies_labels": mol_batch["true_selfies_labels"],
+                "task_type": "1d_to_3d",  # 或者根据你的任务类型（可能动态设置）
 
                 # 额外的 LM 任务相关参数，如果 MMadaModelLM.forward_process 内部支持同时计算
                 # 注意：你需要调整 modeling_mmada.py 中的 forward_process 来接收这些参数
-                "lm_input_ids": lm_input_ids, # 经过 masking 的 lm 输入
-                "lm_labels": lm_labels, # 原始 lm 标签
-                "lm_p_mask": lm_p_mask, # lm 的 masking 概率
-                "lm_answer_lengths": lm_answer_lengths, # lm 的答案长度
+                "lm_input_ids": lm_input_ids,  # 经过 masking 的 lm 输入
+                "lm_labels": lm_labels,  # 原始 lm 标签
+                "lm_p_mask": lm_p_mask,  # lm 的 masking 概率
+                "lm_answer_lengths": lm_answer_lengths,  # lm 的答案长度
             }
 
             with accelerator.accumulate(model):
@@ -418,7 +440,8 @@ def main():
             if accelerator.sync_gradients:
                 # 梯度裁剪
                 if config.training.max_grad_norm is not None:
-                    accelerator.clip_grad_norm_(model.parameters(), config.training.max_grad_norm)
+                    accelerator.clip_grad_norm_(
+                        model.parameters(), config.training.max_grad_norm)
 
                 # 优化器步进和学习率调度
                 optimizer.step()
@@ -436,7 +459,8 @@ def main():
                 # 日志记录 (与之前修改一致)
                 if (global_step + 1) % config.experiment.log_every == 0:
                     samples_per_second_per_gpu = (
-                        config.training.gradient_accumulation_steps * total_batch_size_per_gpu / batch_time_m.val
+                        config.training.gradient_accumulation_steps *
+                        total_batch_size_per_gpu / batch_time_m.val
                     )
                     logs = {
                         "total_loss": total_loss.item(),
@@ -447,7 +471,8 @@ def main():
                         logs[loss_name] = loss_value.item()
                     accelerator.log(logs, step=global_step + 1)
 
-                    logger.info(f"Step: {global_step + 1} Total Loss: {total_loss.item():0.4f} LR: {lr_scheduler.get_last_lr()[0]:0.6f}")
+                    logger.info(
+                        f"Step: {global_step + 1} Total Loss: {total_loss.item():0.4f} LR: {lr_scheduler.get_last_lr()[0]:0.6f}")
                     for loss_name, loss_value in losses.items():
                         logger.info(f"  {loss_name}: {loss_value.item():0.4f}")
 
@@ -456,7 +481,8 @@ def main():
 
                 # 保存检查点
                 if (global_step + 1) % config.experiment.save_every == 0:
-                    save_checkpoint(model, config, accelerator, global_step + 1, uni_prompting)
+                    save_checkpoint(model, config, accelerator,
+                                    global_step + 1, uni_prompting)
 
                 # 生成聊天文本 (或其他任务的评估/生成)
                 if ((global_step + 1) % config.experiment.generate_every == 0 or global_step == start_step) and accelerator.is_main_process:
@@ -469,11 +495,11 @@ def main():
 
             # 7. 检查是否达到最大训练步数，如果是则退出内层循环
             if global_step >= config.training.max_train_steps:
-                break # 退出 for batch, ... 循环
+                break  # 退出 for batch, ... 循环
 
         # 如果达到最大训练步数，也退出外层循环
         if global_step >= config.training.max_train_steps:
-            break #
+            break
 
     accelerator.wait_for_everyone()
 
@@ -483,9 +509,11 @@ def main():
     # Save the final trained checkpoint
     if accelerator.is_main_process:
         model = accelerator.unwrap_model(model)
-        model.save_pretrained(config.experiment.output_dir, safe_serialization=True)
+        model.save_pretrained(config.experiment.output_dir,
+                              safe_serialization=True)
 
     accelerator.end_training()
+
 
 @torch.no_grad()
 def generate_chat_text(
@@ -498,7 +526,8 @@ def generate_chat_text(
     logger.info("Generating chat text...")
     model.eval()
 
-    df = pandas.read_json(config.dataset.params.lm_chat_validation_jsonl, lines=True)
+    df = pandas.read_json(
+        config.dataset.params.lm_chat_validation_jsonl, lines=True)
     prompts = df['question'].tolist()
     responses = [''] * len(prompts)
 
@@ -517,8 +546,10 @@ def generate_chat_text(
     for i, prompt in enumerate(prompts):
         original_prompt = prompt
 
-        prompt_with_tags = "<|start_header_id|>user<|end_header_id|>\n" + f"{prompt}" + "<eot_id><|start_header_id|>assistant<|end_header_id|>\n"
-        token_ids = uni_prompting.text_tokenizer([prompt_with_tags])['input_ids'][0]
+        prompt_with_tags = "<|start_header_id|>user<|end_header_id|>\n" + \
+            f"{prompt}" + "<eot_id><|start_header_id|>assistant<|end_header_id|>\n"
+        token_ids = uni_prompting.text_tokenizer(
+            [prompt_with_tags])['input_ids'][0]
         token_ids = [uni_prompting.text_tokenizer.bos_token_id] + token_ids
         input_ids = torch.tensor(token_ids).unsqueeze(0).to(device)
 
@@ -530,7 +561,8 @@ def generate_chat_text(
                 steps=config.dataset.preprocessing.max_lm_text_length // 2,
                 block_length=config.dataset.preprocessing.max_seq_length // 4
             )
-        text = uni_prompting.text_tokenizer.batch_decode(output_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
+        text = uni_prompting.text_tokenizer.batch_decode(
+            output_ids[:, input_ids.shape[1]:], skip_special_tokens=True)
         responses[i] += text[0]
 
         escaped_prompt = html.escape(original_prompt)
@@ -544,15 +576,18 @@ def generate_chat_text(
         </div>
         """
 
-    html_content += "</div>" 
+    html_content += "</div>"
 
     model.train()
 
-    wandb.log({"chat_text_generation": wandb.Html(html_content)}, step=global_step)
+    wandb.log({"chat_text_generation": wandb.Html(
+        html_content)}, step=global_step)
+
 
 def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
     output_dir = config.experiment.output_dir
-    checkpoints_total_limit = config.experiment.get("checkpoints_total_limit", None)
+    checkpoints_total_limit = config.experiment.get(
+        "checkpoints_total_limit", None)
 
     # _before_ saving state, check if this save would set us over the `checkpoints_total_limit`
     if accelerator.is_main_process and checkpoints_total_limit is not None:
@@ -568,10 +603,12 @@ def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
             logger.info(
                 f"{len(checkpoints)} checkpoints already exist, removing {len(removing_checkpoints)} checkpoints"
             )
-            logger.info(f"removing checkpoints: {', '.join(removing_checkpoints)}")
+            logger.info(
+                f"removing checkpoints: {', '.join(removing_checkpoints)}")
 
             for removing_checkpoint in removing_checkpoints:
-                removing_checkpoint = os.path.join(output_dir, removing_checkpoint)
+                removing_checkpoint = os.path.join(
+                    output_dir, removing_checkpoint)
                 shutil.rmtree(removing_checkpoint)
 
     save_path = Path(output_dir) / f"checkpoint-{global_step}"
@@ -587,11 +624,13 @@ def save_checkpoint(model, config, accelerator, global_step, uni_prompting):
             state_dict=state_dict,
             safe_serialization=True
         )
-        json.dump({"global_step": global_step}, (save_path / "metadata.json").open("w+"))
+        json.dump({"global_step": global_step},
+                  (save_path / "metadata.json").open("w+"))
         logger.info(f"Saved state to {save_path}")
 
         # save tokenizer
-        uni_prompting.text_tokenizer.save_pretrained(save_path/ "unwrapped_model")
+        uni_prompting.text_tokenizer.save_pretrained(
+            save_path / "unwrapped_model")
 
 
 def log_grad_norm(model, accelerator, global_step):
@@ -600,6 +639,7 @@ def log_grad_norm(model, accelerator, global_step):
             grads = param.grad.detach().data
             grad_norm = (grads.norm(p=2) / grads.numel()).item()
             accelerator.log({"grad_norm/" + name: grad_norm}, step=global_step)
+
 
 if __name__ == "__main__":
     main()

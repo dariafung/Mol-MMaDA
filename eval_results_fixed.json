@@ -1,0 +1,22 @@
+{
+  "scale": 0.1,
+  "input_rows": 5,
+  "skipped_rows": 0,
+  "used_molecules": 5,
+  "metrics_3d": {
+    "mol_stable": 0.0,
+    "atom_stable": 0.96875,
+    "Validity": 1.0,
+    "Complete": 0.0,
+    "Unique": 0.8,
+    "Novelty": -1
+  },
+  "metrics_2d": {
+    "mol_stable": 1.0,
+    "atom_stable": 1.0,
+    "Validity": 1.0,
+    "Complete": 0.0,
+    "Unique": 0.8,
+    "Novelty": -1
+  }
+}

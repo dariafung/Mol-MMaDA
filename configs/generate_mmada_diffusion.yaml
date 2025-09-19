@@ -1,0 +1,22 @@
+# Generation-time (diffusion) config for Chem-MMaDA
+
+generation:
+  # RNG
+  seed: 1234
+  commit_class0: True
+  # Diffusion / sampling steps
+  t_steps:  100       # 若为 null 则用训练配置里的 diffusion_timesteps
+
+  # Classifier-Free Guidance (若模型支持)
+  guidance_scale: 1.0
+
+  # Discrete type decoding (若模型支持离散扩散remask逻辑)
+  type_conf_frac: 0.2
+  type_topk: 3          # 原子类型 top-k 采样
+  temperature: 0.9      # 类型softmax温度
+
+  # 可覆盖噪声调度名（若模型采样实现支持）
+  scheduler_name: linear
+
+  # 覆盖紧凑索引到原子序数的映射（长度需与模型一致）
+  idx2z: [0, 1, 6, 7, 8, 9]

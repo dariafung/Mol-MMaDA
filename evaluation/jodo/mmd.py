@@ -1,6 +1,9 @@
 # Geometric substructure mmd evaluation; More advanced MMD metric could be used here.
 
-import torch
+try:
+    import torch  # optional for CPU eval
+except Exception:
+    torch = None
 
 
 def compute_mmd(source, target, batch_size=1000, kernel_mul=2.0, kernel_num=5, fix_sigma=None):

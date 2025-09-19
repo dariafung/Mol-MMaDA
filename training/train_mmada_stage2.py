@@ -18,8 +18,8 @@ import wandb
 
 from models.modeling_mmada import MMadaConfig, MMadaModelLM
 from models.lr_schedulers import get_scheduler
-from parquet.my_dataset import MolecularUnifiedDataset
-from training.utils import get_noise_schedule, flatten_omega_conf
+from data.my_dataset import MolecularUnifiedDataset
+from .utils import get_noise_schedule, flatten_omega_conf
 
 logger = get_logger(__name__)
 
@@ -67,7 +67,8 @@ def generate_for_evaluation(
                 mol = Chem.MolFromSmiles(smiles)
             except Exception:
                 mol = None
-        outputs.append({**sample, "prompt": prompt, "selfies": selfies_str, "smiles": smiles, "mol": mol})
+        outputs.append({**sample, "prompt": prompt,
+                       "selfies": selfies_str, "smiles": smiles, "mol": mol})
     model.train()
     return outputs
 
@@ -133,7 +134,8 @@ def main() -> None:
         pass
 
     if accelerator.is_main_process:
-        flat_cfg = OmegaConf.to_container(OmegaConf.create(cfg_dict), resolve=True)
+        flat_cfg = OmegaConf.to_container(
+            OmegaConf.create(cfg_dict), resolve=True)
         wandb.init(
             project=args.experiment.project,
             name=args.experiment.name,
@@ -150,7 +152,8 @@ def main() -> None:
         set_seed(args.training.seed)
 
     # tokenizer
-    tokenizer = transformers.AutoTokenizer.from_pretrained(args.model.llm_model_name_or_path)
+    tokenizer = transformers.AutoTokenizer.from_pretrained(
+        args.model.llm_model_name_or_path)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
 
@@ -261,7 +264,8 @@ def main() -> None:
 
     if args.experiment.resume_from_checkpoint:
         outdir = Path(args.experiment.output_dir)
-        ckpts = [p for p in outdir.iterdir() if p.name.startswith("checkpoint-")]
+        ckpts = [p for p in outdir.iterdir(
+        ) if p.name.startswith("checkpoint-")]
         if ckpts:
             latest = sorted(ckpts, key=lambda x: int(x.name.split("-")[1]))[-1]
             logger.info(f"Resuming from {latest}")
@@ -272,7 +276,8 @@ def main() -> None:
                     meta = json.load(f)
                 global_step = meta.get("global_step", 0)
 
-    progress = tqdm(range(args.training.max_train_steps), disable=not accelerator.is_main_process, desc="Training")
+    progress = tqdm(range(args.training.max_train_steps),
+                    disable=not accelerator.is_main_process, desc="Training")
 
     while global_step < args.training.max_train_steps:
         for batch in dataloader:
@@ -308,11 +313,13 @@ def main() -> None:
                     "train/total_loss": float(total_loss.item()),
                     "train/learning_rate": lr_scheduler.get_last_lr()[0],
                 }
-                log_d.update({f"train/{k}": float(v.item()) for k, v in losses.items()})
+                log_d.update({f"train/{k}": float(v.item())
+                             for k, v in losses.items()})
                 wandb.log(log_d, step=global_step)
 
                 if global_step % args.experiment.eval_every == 0:
-                    decoded = tokenizer.batch_decode(batch["selfies_input_ids"], skip_special_tokens=True)
+                    decoded = tokenizer.batch_decode(
+                        batch["selfies_input_ids"], skip_special_tokens=True)
                     prompts = decoded[:8]
                     gen_list = generate_for_evaluation(
                         accelerator.unwrap_model(model),
@@ -324,10 +331,12 @@ def main() -> None:
                         max_atoms=args.model.max_atoms,
                         max_selfies_length=args.model.max_selfies_length,
                     )
-                    run_periodic_evaluation(model, tokenizer, args, accelerator, global_step, gen_list)
+                    run_periodic_evaluation(
+                        model, tokenizer, args, accelerator, global_step, gen_list)
 
                 if global_step % args.experiment.save_every == 0:
-                    ckpt_dir = Path(args.experiment.output_dir) / f"checkpoint-{global_step}"
+                    ckpt_dir = Path(args.experiment.output_dir) / \
+                        f"checkpoint-{global_step}"
                     accelerator.save_state(str(ckpt_dir))
                     with open(ckpt_dir / "metadata.json", "w") as f:
                         json.dump({"global_step": global_step}, f)

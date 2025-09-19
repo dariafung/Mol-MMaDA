@@ -4,7 +4,11 @@ from rdkit import Chem, RDLogger
 from rdkit.Chem.rdMolTransforms import GetBondLength, GetAngleDeg, GetDihedralDeg
 from .mmd import compute_mmd
 # from mmd import compute_mmd
-import torch
+try:
+    import torch
+except Exception:
+    torch = None
+
 import time
 import numpy as np
 import os
