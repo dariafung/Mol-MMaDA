@@ -1,28 +1,21 @@
 {
-  "input_rows": 5,
-  "skipped_rows": 0,
-  "used_molecules": 5,
-  "metrics_3d": {
-    "mol_stable": 0.0,
-    "atom_stable": 0.96875,
-    "Validity": 1.0,
-    "Complete": 0.0,
-    "Unique": 0.6,
-    "Novelty": -1
-  },
+  "scale_factor": 0.0043,
+  "n_molecules": 5,
+  "n_skipped": 0,
   "metrics_2d": {
     "mol_stable": 1.0,
     "atom_stable": 1.0,
     "Validity": 1.0,
     "Complete": 0.0,
-    "Unique": 0.6,
+    "Unique": 0.2,
     "Novelty": -1
   },
-  "config": {
-    "dataset": "Geom",
-    "scale": 0.1,
-    "center": false,
-    "mmff": false,
-    "seed": 0
+  "metrics_3d": {
+    "mol_stable": 0.0,
+    "atom_stable": 0.8125,
+    "Validity": 1.0,
+    "Complete": 0.0,
+    "Unique": 1.0,
+    "Novelty": -1
   }
 }

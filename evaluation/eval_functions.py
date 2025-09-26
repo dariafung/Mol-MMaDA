@@ -8,16 +8,16 @@ try:
 except Exception:
     torch = None
 from rdkit import Chem
-from evaluation.jodo.rdkit_metric import eval_rdmol
+from .jodo.rdkit_metric import eval_rdmol
 # from evaluation.jodo.mose_metric import compute_intermediate_statistics, mapper, get_smiles, reconstruct_mol, MeanProperty
 # from fcd_torch import FCD as FCDMetric
 from multiprocessing import Pool
 # from moses.metrics.metrics import SNNMetric, FragMetric, ScafMetric, internal_diversity, \
 #     fraction_passes_filters, weight, logP, SA, QED
-from evaluation.jodo.stability import bond_list, allowed_fc_bonds, stability_bonds
+from .jodo.stability import bond_list, allowed_fc_bonds, stability_bonds
 from rdkit.Geometry import Point3D
-from evaluation.jodo.bond_analyze import get_bond_order, geom_predictor, allowed_bonds, allowed_fc_bonds
-from evaluation.jodo.cal_geometry import load_target_geometry, compute_geo_mmd, cal_bond_distance, cal_bond_angle, cal_dihedral_angle
+from .jodo.bond_analyze import get_bond_order, geom_predictor, allowed_bonds, allowed_fc_bonds
+from .jodo.cal_geometry import load_target_geometry, compute_geo_mmd, cal_bond_distance, cal_bond_angle, cal_dihedral_angle
 from tqdm import tqdm
 from rdkit.Chem import AllChem
 
@@ -73,8 +73,10 @@ def check_2D_stability(rdmol):
         if isinstance(possible_bonds, int):
             is_stable = (possible_bonds == nr_bonds_i)
         elif isinstance(possible_bonds, dict):
-            expected_bonds = possible_bonds[fc_i] if fc_i in possible_bonds.keys() else possible_bonds[0]
-            is_stable = (expected_bonds == nr_bonds_i) if isinstance(expected_bonds, int) else (nr_bonds_i in expected_bonds)
+            expected_bonds = possible_bonds[fc_i] if fc_i in possible_bonds.keys(
+            ) else possible_bonds[0]
+            is_stable = (expected_bonds == nr_bonds_i) if isinstance(
+                expected_bonds, int) else (nr_bonds_i in expected_bonds)
         else:
             is_stable = (nr_bonds_i in possible_bonds)
         nr_stable_bonds += int(is_stable)
@@ -142,7 +144,8 @@ def check_3D_stability(positions, atoms, dataset_name, debug=False, rdmol=None, 
     # add coordinates
     conf = Chem.Conformer(rwmol.GetNumAtoms())
     for i in range(rwmol.GetNumAtoms()):
-        conf.SetAtomPosition(i, Point3D(float(positions[i][0]), float(positions[i][1]), float(positions[i][2])))
+        conf.SetAtomPosition(i, Point3D(float(positions[i][0]), float(
+            positions[i][1]), float(positions[i][2])))
     rwmol.AddConformer(conf)
 
     def _can_accept(total_now: int, sym: str, add_order: int) -> bool:
@@ -193,7 +196,8 @@ def check_3D_stability(positions, atoms, dataset_name, debug=False, rdmol=None, 
         else:
             is_stable = (nr_bonds_i in possible_bonds)
         if not is_stable and debug:
-            print(f"Invalid bonds for atom {atom_type_i} with {nr_bonds_i} total order")
+            print(
+                f"Invalid bonds for atom {atom_type_i} with {nr_bonds_i} total order")
         nr_stable_bonds += int(is_stable)
 
     molecule_stable = (nr_stable_bonds == len(x))
@@ -215,7 +219,8 @@ def get_3D_edm_metric(predict_mols, train_mols=None, dataset_name='QM9', use_mmf
         pos = pos - pos.mean(axis=0)
         atom_type = [atom.GetSymbol() for atom in mol.GetAtoms()]
         try:
-            validity_res = check_3D_stability(pos, atom_type, dataset_name, rdmol=mol, use_mmff=use_mmff, debug=False)
+            validity_res = check_3D_stability(
+                pos, atom_type, dataset_name, rdmol=mol, use_mmff=use_mmff, debug=False)
         except Exception:
             print('Check stability failed.')
             validity_res = [0, 0, mol.GetNumAtoms(), mol]
@@ -248,7 +253,8 @@ def get_3D_edm_metric_batch(predict_mols, train_mols=None, dataset_name='QM9'):
     n_atoms = 0
 
     rd_mols = []
-    predict_mols = [predict_mols[i:i+10] for i in range(0, len(predict_mols), 10)]
+    predict_mols = [predict_mols[i:i+10]
+                    for i in range(0, len(predict_mols), 10)]
     for mol_list in tqdm(predict_mols):
         validity_res_list = []
         smiles = [Chem.MolToSmiles(mol) for mol in mol_list]
@@ -258,7 +264,8 @@ def get_3D_edm_metric_batch(predict_mols, train_mols=None, dataset_name='QM9'):
             pos = mol.GetConformer(0).GetPositions()
             pos = pos - pos.mean(axis=0)
             atom_type = [atom.GetSymbol() for atom in mol.GetAtoms()]
-            validity_res = check_3D_stability(pos, atom_type, dataset_name, rdmol=mol)
+            validity_res = check_3D_stability(
+                pos, atom_type, dataset_name, rdmol=mol)
             validity_res_list.append(validity_res)
         max_validity_res = max(validity_res_list, key=lambda x: x[0])
         molecule_stable += int(max_validity_res[0])
@@ -289,13 +296,16 @@ def get_sub_geometry_metric(test_mols, dataset_info, root_path):
 
     def sub_geometry_metric(gen_mols):
         bond_length_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_bond_distance, dataset_info['top_bond_sym'], mean_name='bond_length_mean'
+            gen_mols, tar_geo_stat, cal_bond_distance, dataset_info[
+                'top_bond_sym'], mean_name='bond_length_mean'
         )
         bond_angle_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_bond_angle, dataset_info['top_angle_sym'], mean_name='bond_angle_mean'
+            gen_mols, tar_geo_stat, cal_bond_angle, dataset_info[
+                'top_angle_sym'], mean_name='bond_angle_mean'
         )
         dihedral_angle_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_dihedral_angle, dataset_info['top_dihedral_sym'], mean_name='dihedral_angle_mean'
+            gen_mols, tar_geo_stat, cal_dihedral_angle, dataset_info[
+                'top_dihedral_sym'], mean_name='dihedral_angle_mean'
         )
         metric = {**bond_length_dict, **bond_angle_dict, **dihedral_angle_dict}
         return metric

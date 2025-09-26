@@ -47,3 +47,4 @@ cuda_12.1.1_530.30.02_linux.run
 
 output/
 
+*.sh

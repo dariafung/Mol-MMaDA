@@ -15,12 +15,13 @@ from selfies import get_semantic_robust_alphabet
 from torch.utils.data import DataLoader, IterableDataset
 from transformers import AutoTokenizer
 
-from training.utils import get_mask_schedule, mask_or_random_replace_tokens
+from training.training_utils import get_mask_schedule, mask_or_random_replace_tokens
 
 
 # ---- Atom vocabulary for QM9 (compact indices) ----
 # 0 = PAD/MASK, 1 = H, 2 = C, 3 = N, 4 = O, 5 = F
 QM9_Z2IDX = {0: 0, 1: 1, 6: 2, 7: 3, 8: 4, 9: 5}
+
 
 def atom_to_id(symbol: str) -> int:
     """Convert atomic symbol to atomic number (Z)."""
@@ -43,7 +44,8 @@ def parse_molecular_3d_data(raw_data: Dict[str, Any]) -> Dict[str, torch.Tensor]
         coords_list = json.loads(raw_data.get("coordinates_str", "[]"))
 
         atom_ids = [
-            int(x) if isinstance(x, int) or str(x).isdigit() else atom_to_id(str(x))
+            int(x) if isinstance(x, int) or str(
+                x).isdigit() else atom_to_id(str(x))
             for x in atom_raw
         ]
         atom_vec = torch.tensor(atom_ids, dtype=torch.long)
@@ -51,19 +53,23 @@ def parse_molecular_3d_data(raw_data: Dict[str, Any]) -> Dict[str, torch.Tensor]
 
         edge_type = None
         if raw_data.get("edge_type_str"):
-            edge_type = torch.tensor(json.loads(raw_data["edge_type_str"]), dtype=torch.long)
+            edge_type = torch.tensor(json.loads(
+                raw_data["edge_type_str"]), dtype=torch.long)
 
         bond_type = None
         if raw_data.get("bond_type_str"):
-            bond_type = torch.tensor(json.loads(raw_data["bond_type_str"]), dtype=torch.long)
+            bond_type = torch.tensor(json.loads(
+                raw_data["bond_type_str"]), dtype=torch.long)
 
         dist = None
         if raw_data.get("dist_str"):
-            dist = torch.tensor(json.loads(raw_data["dist_str"]), dtype=torch.float32)
+            dist = torch.tensor(json.loads(
+                raw_data["dist_str"]), dtype=torch.float32)
 
         rdmol2selfies = None
         if raw_data.get("rdmol2selfies_str"):
-            rdmol2selfies = torch.tensor(json.loads(raw_data["rdmol2selfies_str"]), dtype=torch.float32)
+            rdmol2selfies = torch.tensor(json.loads(
+                raw_data["rdmol2selfies_str"]), dtype=torch.float32)
 
         return {
             "atom_vec": atom_vec,             # Z (atomic number)
@@ -87,6 +93,7 @@ class MolecularUnifiedDataset(IterableDataset):
       - Applies masking to atom indices (0 is PAD/MASK class)
       - Pads/truncates to max_atoms and collates into batches
     """
+
     def __init__(
         self,
         data_path: str,
@@ -114,7 +121,8 @@ class MolecularUnifiedDataset(IterableDataset):
 
         self.data_path = data_path
         if os.path.isdir(data_path):
-            self.files = sorted(glob.glob(os.path.join(data_path, "*.parquet")))
+            self.files = sorted(
+                glob.glob(os.path.join(data_path, "*.parquet")))
         else:
             self.files = sorted(glob.glob(data_path))
         if not self.files:
@@ -153,7 +161,8 @@ class MolecularUnifiedDataset(IterableDataset):
         try:
             table = pq.read_table(file_path)
             df = table.to_pandas()
-            df = df[df["selfies_string"].notna() & (df["selfies_string"] != "")]
+            df = df[df["selfies_string"].notna() & (
+                df["selfies_string"] != "")]
             for _, row in df.iterrows():
                 yield row.to_dict()
         except Exception as e:
@@ -197,16 +206,20 @@ class MolecularUnifiedDataset(IterableDataset):
                         selfies_attn_mask = tok_selfies.attention_mask[0]
 
                         # Diffusion timestep & mask ratio for SELFIES tokens
-                        timestep = torch.randint(0, self.diffusion_timesteps, (1,)).item()
-                        current_ratio = self.mask_schedule_values[timestep].item()
+                        timestep = torch.randint(
+                            0, self.diffusion_timesteps, (1,)).item()
+                        current_ratio = self.mask_schedule_values[timestep].item(
+                        )
                         if self.selfies_mask_ratio is not None:
                             current_ratio = self.selfies_mask_ratio
 
                         masked_selfies_ids, true_selfies_labels, _ = mask_or_random_replace_tokens(
                             selfies_ids_clean.unsqueeze(0),
-                            self.mask_token_id,  # this is tokenizer.mask_token_id (text side)
+                            # this is tokenizer.mask_token_id (text side)
+                            self.mask_token_id,
                             mask_ratio=current_ratio,
-                            vocab_size=getattr(self.tokenizer, "vocab_size", None) or len(self.tokenizer),
+                            vocab_size=getattr(self.tokenizer, "vocab_size", None) or len(
+                                self.tokenizer),
                             is_train=True,
                         )
                         masked_selfies_ids = masked_selfies_ids.squeeze(0)
@@ -239,41 +252,58 @@ class MolecularUnifiedDataset(IterableDataset):
                             # skip overly large molecules (keep data/model consistent)
                             continue
 
-                        # Center coordinates per molecule
+                        # Center and normalize coordinates per molecule
                         if coordinates.shape[0] > 0:
+                            # Center coordinates
                             centroid = coordinates.mean(dim=0)
                             coordinates = coordinates - centroid
+
+                            # Normalize coordinates to reasonable scale
+                            distances = torch.norm(coordinates, dim=1)
+                            if distances.numel() > 0:
+                                scale_factor = torch.quantile(distances, 0.95)
+                                if scale_factor > 1e-6:
+                                    coordinates = coordinates / scale_factor * \
+                                        2.0  # Scale to [-2, 2] range
 
                         # ----- Z -> compact idx (QM9) -----
                         # Any atom Z not in QM9_Z2IDX will be mapped to 0 (PAD/MASK) and effectively ignored.
                         atom_idx = torch.tensor(
-                            [QM9_Z2IDX.get(int(z), 0) for z in atom_vec_Z.tolist()],
+                            [QM9_Z2IDX.get(int(z), 0)
+                             for z in atom_vec_Z.tolist()],
                             dtype=torch.long,
                         )
 
                         # ----- Pad atoms (idx) and coordinates -----
                         num_atoms = atom_idx.shape[0]
 
-                        padded_atom_idx = torch.full((self.max_atoms,), 0, dtype=torch.long)  # 0=PAD/MASK
+                        padded_atom_idx = torch.full(
+                            (self.max_atoms,), 0, dtype=torch.long)  # 0=PAD/MASK
                         padded_atom_idx[:num_atoms] = atom_idx
 
-                        padded_coords = torch.zeros((self.max_atoms, 3), dtype=torch.float32)
+                        padded_coords = torch.zeros(
+                            (self.max_atoms, 3), dtype=torch.float32)
                         padded_coords[:num_atoms] = coordinates
 
-                        atoms_mask = torch.zeros((self.max_atoms,), dtype=torch.bool)
+                        atoms_mask = torch.zeros(
+                            (self.max_atoms,), dtype=torch.bool)
                         atoms_mask[:num_atoms] = True
 
                         # ----- Mask atom indices for discrete diffusion (atom types) -----
                         masked_atom_idx = padded_atom_idx.clone()
                         if self.atom_type_mask_prob > 0:
-                            rand_mask = torch.rand_like(masked_atom_idx, dtype=torch.float32) < self.atom_type_mask_prob
+                            rand_mask = torch.rand_like(
+                                masked_atom_idx, dtype=torch.float32) < self.atom_type_mask_prob
                             final_mask = rand_mask & atoms_mask
-                            masked_atom_idx[final_mask] = self.atom_mask_token_id  # 0
+                            # 0
+                            masked_atom_idx[final_mask] = self.atom_mask_token_id
 
                             # Ensure at least one real (non-mask) atom remains when atoms exist
                             if atoms_mask.any() and (masked_atom_idx != self.atom_mask_token_id)[atoms_mask].sum() == 0:
-                                real_idxs = atoms_mask.nonzero(as_tuple=True)[0]
-                                ridx = real_idxs[torch.randint(len(real_idxs), (1,)).item()]
+                                real_idxs = atoms_mask.nonzero(
+                                    as_tuple=True)[0]
+                                ridx = real_idxs[torch.randint(
+                                    len(real_idxs), (1,)).item()]
                                 masked_atom_idx[ridx] = padded_atom_idx[ridx]
 
                         sample = {
@@ -286,8 +316,10 @@ class MolecularUnifiedDataset(IterableDataset):
                             "text_input_ids": text_input_ids,
                             "text_attention_mask": text_attention_mask,
                             # atom types (idx) and coords
-                            "atom_vec": masked_atom_idx,           # input (masked idx)
-                            "true_atom_vec": padded_atom_idx,      # labels (idx)
+                            # input (masked idx)
+                            "atom_vec": masked_atom_idx,
+                            # labels (idx)
+                            "true_atom_vec": padded_atom_idx,
                             "coordinates": padded_coords,          # input coords
                             "true_coordinates": padded_coords.clone(),  # labels coords
                             "atoms_mask": atoms_mask,
@@ -298,25 +330,29 @@ class MolecularUnifiedDataset(IterableDataset):
                         if self.include_edge_bond_dist:
                             if mol_3d.get("edge_type") is not None:
                                 et = mol_3d["edge_type"]
-                                pad = torch.zeros((self.max_atoms, self.max_atoms), dtype=torch.long)
+                                pad = torch.zeros(
+                                    (self.max_atoms, self.max_atoms), dtype=torch.long)
                                 pad[: et.shape[0], : et.shape[1]] = et
                                 sample["edge_type"] = pad
 
                             if mol_3d.get("bond_type") is not None:
                                 bt = mol_3d["bond_type"]
-                                pad = torch.zeros((self.max_atoms, self.max_atoms), dtype=torch.long)
+                                pad = torch.zeros(
+                                    (self.max_atoms, self.max_atoms), dtype=torch.long)
                                 pad[: bt.shape[0], : bt.shape[1]] = bt
                                 sample["bond_type"] = pad
 
                             if mol_3d.get("dist") is not None:
                                 dist = mol_3d["dist"]
-                                pad = torch.zeros((self.max_atoms, self.max_atoms), dtype=torch.float32)
+                                pad = torch.zeros(
+                                    (self.max_atoms, self.max_atoms), dtype=torch.float32)
                                 pad[: dist.shape[0], : dist.shape[1]] = dist
                                 sample["dist"] = pad
 
                         if self.include_rdmol2selfies and mol_3d.get("rdmol2selfies") is not None:
                             r2s = mol_3d["rdmol2selfies"]
-                            pad = torch.zeros((self.max_atoms, self.max_selfies_length), dtype=torch.float32)
+                            pad = torch.zeros(
+                                (self.max_atoms, self.max_selfies_length), dtype=torch.float32)
                             a_dim = min(r2s.shape[0], self.max_atoms)
                             s_dim = min(r2s.shape[1], self.max_selfies_length)
                             pad[:a_dim, :s_dim] = r2s[:a_dim, :s_dim]
@@ -331,9 +367,11 @@ class MolecularUnifiedDataset(IterableDataset):
                                     props.append(float("nan"))
                                 else:
                                     props.append(float(v))
-                            sample["true_props"] = torch.tensor(props, dtype=torch.float32)
+                            sample["true_props"] = torch.tensor(
+                                props, dtype=torch.float32)
                         except Exception:
-                            sample["true_props"] = torch.tensor([float("nan")] * len(self.prop_cols), dtype=torch.float32)
+                            sample["true_props"] = torch.tensor(
+                                [float("nan")] * len(self.prop_cols), dtype=torch.float32)
 
                         buffer.append(sample)
                         if len(buffer) >= self.buffer_size:
@@ -368,7 +406,8 @@ class MolecularUnifiedDataset(IterableDataset):
         # SELFIES
         if "selfies_input_ids" in buckets:
             padded = self.tokenizer.pad(
-                {"input_ids": buckets["selfies_input_ids"], "attention_mask": buckets["selfies_attention_mask"]},
+                {"input_ids": buckets["selfies_input_ids"],
+                    "attention_mask": buckets["selfies_attention_mask"]},
                 padding=True,
                 return_tensors="pt",
             )
@@ -383,7 +422,8 @@ class MolecularUnifiedDataset(IterableDataset):
             padded_labels = []
             for s in buckets["true_selfies_labels"]:
                 pad_len = max_len - s.size(0)
-                padded_labels.append(F.pad(s, (0, pad_len), "constant", -100))  # -100 for CE ignore_index
+                # -100 for CE ignore_index
+                padded_labels.append(F.pad(s, (0, pad_len), "constant", -100))
             out["true_selfies_labels"] = torch.stack(padded_labels, dim=0)
         else:
             out["true_selfies_labels"] = torch.empty(0, dtype=torch.long)
@@ -391,7 +431,8 @@ class MolecularUnifiedDataset(IterableDataset):
         # text
         if "text_input_ids" in buckets:
             padded = self.tokenizer.pad(
-                {"input_ids": buckets["text_input_ids"], "attention_mask": buckets["text_attention_mask"]},
+                {"input_ids": buckets["text_input_ids"],
+                    "attention_mask": buckets["text_attention_mask"]},
                 padding=True,
                 return_tensors="pt",
             )
@@ -403,16 +444,19 @@ class MolecularUnifiedDataset(IterableDataset):
 
         # props
         if "true_props" in buckets and len(buckets["true_props"]) > 0:
-            kept = [t for t in buckets["true_props"] if isinstance(t, torch.Tensor)]
+            kept = [t for t in buckets["true_props"]
+                    if isinstance(t, torch.Tensor)]
             if len(kept) == len(buckets["true_props"]) and len(kept) > 0:
                 out["true_props"] = torch.stack(kept, dim=0).float()  # (B,6)
             else:
-                out["true_props"] = torch.empty(len(batch), 0, dtype=torch.float32)
+                out["true_props"] = torch.empty(
+                    len(batch), 0, dtype=torch.float32)
         else:
             out["true_props"] = torch.empty(len(batch), 0, dtype=torch.float32)
 
         # atoms/coords (+ optionals)
-        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask", "timesteps", "true_atom_vec", "true_coordinates"]
+        keys_to_stack = ["atom_vec", "coordinates", "atoms_mask",
+                         "timesteps", "true_atom_vec", "true_coordinates"]
         if self.include_edge_bond_dist:
             keys_to_stack.extend(["edge_type", "bond_type", "dist"])
         if self.include_rdmol2selfies:
@@ -423,19 +467,25 @@ class MolecularUnifiedDataset(IterableDataset):
                 out[k] = torch.stack(buckets[k], dim=0)
             else:
                 if k in ["coordinates", "true_coordinates"]:
-                    out[k] = torch.empty(len(batch), self.max_atoms, 3, dtype=torch.float32)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, 3, dtype=torch.float32)
                 elif k == "atoms_mask":
-                    out[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.bool)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, dtype=torch.bool)
                 elif k == "timesteps":
                     out[k] = torch.empty(len(batch), 1, dtype=torch.long)
                 elif k in ["edge_type", "bond_type"]:
-                    out[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.long)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, self.max_atoms, dtype=torch.long)
                 elif k == "dist":
-                    out[k] = torch.empty(len(batch), self.max_atoms, self.max_atoms, dtype=torch.float32)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, self.max_atoms, dtype=torch.float32)
                 elif k == "rdmol2selfies":
-                    out[k] = torch.empty(len(batch), self.max_atoms, self.max_selfies_length, dtype=torch.float32)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, self.max_selfies_length, dtype=torch.float32)
                 else:
-                    out[k] = torch.empty(len(batch), self.max_atoms, dtype=torch.long)
+                    out[k] = torch.empty(
+                        len(batch), self.max_atoms, dtype=torch.long)
 
         return out
 
@@ -450,7 +500,8 @@ if __name__ == "__main__":
         tokenizer = AutoTokenizer.from_pretrained("bert-base-uncased")
 
     # Extend tokenizer with SELFIES alphabet if needed (text side only)
-    new_tokens = set(get_semantic_robust_alphabet()) - set(tokenizer.get_vocab().keys())
+    new_tokens = set(get_semantic_robust_alphabet()) - \
+        set(tokenizer.get_vocab().keys())
     if new_tokens:
         tokenizer.add_tokens(list(new_tokens))
 
@@ -481,7 +532,8 @@ if __name__ == "__main__":
         atom_mask_token_id=0,        # atom-type PAD/MASK = 0
     )
 
-    dl = DataLoader(dataset, batch_size=32, collate_fn=dataset.collate_fn, num_workers=4)
+    dl = DataLoader(dataset, batch_size=32,
+                    collate_fn=dataset.collate_fn, num_workers=4)
 
     print("Testing dataloader...")
     for i, batch in enumerate(dl):

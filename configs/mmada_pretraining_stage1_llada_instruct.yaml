@@ -89,7 +89,7 @@ lr_scheduler:
 experiment:
   name: "chem-mmada-pretrain-stage1"
   project: "Chem-MMaDA"
-  output_dir: "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage2-llada-instruct"
+  output_dir: "/work/hdd/bezp/yfeng7/outputs/mmada-training-stage1-llada-instruct"
   log_every: 100
   eval_every: 5000
   save_every: 5000

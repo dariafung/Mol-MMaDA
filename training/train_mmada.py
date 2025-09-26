@@ -1,4 +1,4 @@
-from .utils import get_noise_schedule
+from training.training_utils import get_noise_schedule
 from selfies import get_semantic_robust_alphabet
 from data.my_dataset import MolecularUnifiedDataset
 from models.lr_schedulers import get_scheduler
