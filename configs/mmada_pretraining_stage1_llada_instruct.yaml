@@ -41,12 +41,14 @@ model:
   mask_schedule_start: 0.25
   mask_schedule_end: 0.75
 
-  # Data
+  # Data - GEOM-QM9 for 1D→3D conformation prediction
   data_path: "/projects/bezp/yfeng7/data/qm9_molecular_data.parquet"
   selfies_mask_ratio: null
   atom_type_mask_prob: 0.3
   include_edge_bond_dist: true
   include_rdmol2selfies: false
+  # Task: 1D molecular input → 3D conformation output
+  task_type: "1d_to_3d"
 
 # --- Dataset ---
 dataset:

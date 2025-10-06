@@ -1,313 +1,299 @@
-# Description: Evaluation functions for 2D and 3D molecules
-import copy
-import numpy as np
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+Standalone evaluator for 3D conformer prediction (NExT-Mol style).
+
+- Provides `conformer_evaluation_V2` with the same output keys that their eval script prints:
+  ['recall_coverage_mean', 'recall_coverage_median',
+   'recall_amr_mean', 'recall_amr_median',
+   'precision_coverage_mean', 'precision_coverage_median',
+   'precision_amr_mean', 'precision_amr_median']
+
+- CLI mimics their eval_confs.py but adds --gt to supply ground-truth conformers directly.
+- Threshold defaults follow the paper: QM9=0.5 Å, GEOM-DRUGS=0.75 Å.
+"""
+
+import argparse
 import pickle
-import os
+import numpy as np
+from typing import Any, Dict, List, Tuple
+
 try:
-    import torch  # optional for CPU eval
+    from rdkit import Chem
+    _HAVE_RDKIT = True
 except Exception:
-    torch = None
-from rdkit import Chem
-from .jodo.rdkit_metric import eval_rdmol
-# from evaluation.jodo.mose_metric import compute_intermediate_statistics, mapper, get_smiles, reconstruct_mol, MeanProperty
-# from fcd_torch import FCD as FCDMetric
-from multiprocessing import Pool
-# from moses.metrics.metrics import SNNMetric, FragMetric, ScafMetric, internal_diversity, \
-#     fraction_passes_filters, weight, logP, SA, QED
-from .jodo.stability import bond_list, allowed_fc_bonds, stability_bonds
-from rdkit.Geometry import Point3D
-from .jodo.bond_analyze import get_bond_order, geom_predictor, allowed_bonds, allowed_fc_bonds
-from .jodo.cal_geometry import load_target_geometry, compute_geo_mmd, cal_bond_distance, cal_bond_angle, cal_dihedral_angle
-from tqdm import tqdm
-from rdkit.Chem import AllChem
+    _HAVE_RDKIT = False
 
+Array = np.ndarray
+CoordList = List[Array]
 
-def _safe_sanitize(mol: Chem.Mol) -> Chem.Mol:
-    """Try to sanitize the molecule; always at least update property cache."""
-    if mol is None:
-        return mol
-    try:
-        mol.UpdatePropertyCache(strict=False)
-    except Exception:
-        pass
-    try:
-        Chem.SanitizeMol(mol)
-    except Exception:
-        # Keep going with partially-sanitized mol to avoid RDKit precondition crashes later
-        try:
-            mol.UpdatePropertyCache(strict=False)
-        except Exception:
-            pass
-    return mol
+# --------------------------- utilities ---------------------------
 
+def _centered(x: Array) -> Array:
+    return x - x.mean(axis=0, keepdims=True)
 
-def check_2D_stability(rdmol):
-    """Convert the generated tensors to rdkit mols and check stability."""
-    # Ensure properties/implicit valence are computed before AddHs()
-    rdmol = Chem.Mol(rdmol)
-    rdmol = _safe_sanitize(rdmol)
+def _kabsch_rmsd(P: Array, Q: Array) -> float:
+    """Kabsch-aligned RMSD for two (N,3) arrays."""
+    Pc, Qc = _centered(P), _centered(Q)
+    C = Pc.T @ Qc
+    V, S, Wt = np.linalg.svd(C)
+    d = np.sign(np.linalg.det(V @ Wt))
+    D = np.diag([1.0, 1.0, d])
+    U = V @ D @ Wt
+    P_rot = Pc @ U
+    return float(np.sqrt(np.mean(np.sum((P_rot - Qc) ** 2, axis=1))))
 
-    rdmol = Chem.AddHs(rdmol)
-    atom_num = rdmol.GetNumAtoms()
+def _to_coord_list_from_rdkit_mol(mol) -> CoordList:
+    coords: CoordList = []
+    if hasattr(mol, "__iter__") and not isinstance(mol, Chem.Mol):
+        # List[Mol]
+        for m in mol:
+            if m is None:
+                continue
+            confs = m.GetConformers()
+            if len(confs) == 0:
+                continue
+            conf = confs[0]
+            N = m.GetNumAtoms()
+            arr = np.array([list(conf.GetAtomPosition(i)) for i in range(N)], dtype=float)
+            coords.append(arr)
+    else:
+        # Single Mol
+        m = mol
+        if m is None:
+            return coords
+        confs = m.GetConformers()
+        if len(confs) == 0:
+            return coords
+        conf = confs[0]
+        N = m.GetNumAtoms()
+        arr = np.array([list(conf.GetAtomPosition(i)) for i in range(N)], dtype=float)
+        coords.append(arr)
+    return coords
 
-    new_mol = copy.deepcopy(rdmol)
-    try:
-        Chem.Kekulize(new_mol)
-    except Exception:
-        print("Can't Kekulize mol.")
-        pass
-
-    nr_bonds = np.zeros(atom_num, dtype='int')
-    for bond in new_mol.GetBonds():
-        start, end = bond.GetBeginAtomIdx(), bond.GetEndAtomIdx()
-        bond_type = bond.GetBondType()
-        order = stability_bonds[bond_type]
-        nr_bonds[start] += order
-        nr_bonds[end] += order
-
-    nr_stable_bonds = 0
-    atom_types_str = [atom.GetSymbol() for atom in rdmol.GetAtoms()]
-    formal_charges = [atom.GetFormalCharge() for atom in rdmol.GetAtoms()]
-    for atom_type_i, nr_bonds_i, fc_i in zip(atom_types_str, nr_bonds, formal_charges):
-        possible_bonds = allowed_fc_bonds[atom_type_i]
-        if isinstance(possible_bonds, int):
-            is_stable = (possible_bonds == nr_bonds_i)
-        elif isinstance(possible_bonds, dict):
-            expected_bonds = possible_bonds[fc_i] if fc_i in possible_bonds.keys(
-            ) else possible_bonds[0]
-            is_stable = (expected_bonds == nr_bonds_i) if isinstance(
-                expected_bonds, int) else (nr_bonds_i in expected_bonds)
-        else:
-            is_stable = (nr_bonds_i in possible_bonds)
-        nr_stable_bonds += int(is_stable)
-
-    molecule_stable = (nr_stable_bonds == atom_num)
-    return molecule_stable, nr_stable_bonds, atom_num
-
-
-def get_2D_edm_metric(predict_mols, train_mols=None):
-    train_smiles = None
-    if train_mols is not None:
-        train_smiles = [Chem.MolToSmiles(mol) for mol in train_mols]
-        train_smiles = [Chem.CanonSmiles(s) for s in train_smiles]
-
-    molecule_stable = 0
-    nr_stable_bonds = 0
-    n_atoms = 0
-
-    for mol in tqdm(predict_mols):
-        try:
-            validity_res = check_2D_stability(mol)
-        except Exception:
-            print('Check stability failed.')
-            validity_res = [0, 0, mol.GetNumAtoms()]
-        molecule_stable += int(validity_res[0])
-        nr_stable_bonds += int(validity_res[1])
-        n_atoms += int(validity_res[2])
-
-    fraction_mol_stable = molecule_stable / float(len(predict_mols))
-    fraction_atm_stable = nr_stable_bonds / float(n_atoms)
-
-    output_dict = {
-        'mol_stable': fraction_mol_stable,
-        'atom_stable': fraction_atm_stable,
-    }
-
-    rdkit_dict = eval_rdmol(predict_mols, train_smiles)
-    output_dict.update(rdkit_dict)
-    return output_dict
-
-
-def check_3D_stability(positions, atoms, dataset_name, debug=False, rdmol=None, use_mmff=False):
-    """Reconstruct bonds from 3D coordinates with valence-safe capping and build an RDKit Mol."""
-    assert len(positions.shape) == 2
-    assert positions.shape[1] == 3
-
-    if use_mmff:
-        try:
-            AllChem.MMFFOptimizeMolecule(rdmol, confId=0, maxIters=200)
-            positions = rdmol.GetConformer(0).GetPositions()
-        except Exception:
-            print('MMFF failed, use original coordinates.')
-
-    x = positions[:, 0]
-    y = positions[:, 1]
-    z = positions[:, 2]
-
-    nr_bonds = np.zeros(len(x), dtype='int')
-
-    # create atoms
-    rwmol = Chem.RWMol()
-    for sym in atoms:
-        rwmol.AddAtom(Chem.Atom(sym))
-
-    # add coordinates
-    conf = Chem.Conformer(rwmol.GetNumAtoms())
-    for i in range(rwmol.GetNumAtoms()):
-        conf.SetAtomPosition(i, Point3D(float(positions[i][0]), float(
-            positions[i][1]), float(positions[i][2])))
-    rwmol.AddConformer(conf)
-
-    def _can_accept(total_now: int, sym: str, add_order: int) -> bool:
-        allowed = allowed_bonds[sym]
-        target = int(total_now) + int(add_order)
-        if isinstance(allowed, int):
-            return target <= allowed
-        try:
-            mx = max(allowed) if len(allowed) > 0 else 0
-        except Exception:
-            mx = 0
-        return (target in allowed) or (target <= mx)
-
-    # propose bond order, downscale if needed to avoid over-valence, then add bond
-    for i in range(len(x)):
-        for j in range(i + 1, len(x)):
-            p1 = np.array([x[i], y[i], z[i]], dtype=float)
-            p2 = np.array([x[j], y[j], z[j]], dtype=float)
-            dist = float(np.linalg.norm(p1 - p2))
-            a1, a2 = atoms[i], atoms[j]
-            pair = tuple(sorted([a1, a2]))
-
-            if 'QM9' in dataset_name:
-                order = int(get_bond_order(a1, a2, dist))
-            elif 'Geom' in dataset_name:
-                order = int(geom_predictor(pair, dist))
+def _to_coord_list(item: Any) -> Tuple[CoordList, List[str]]:
+    """
+    Normalize different input formats to a list of (N,3) numpy arrays.
+    Returns: (confs, symbols)
+    """
+    symbols: List[str] = []
+    # Dict format
+    if isinstance(item, dict):
+        confs = item.get("confs", [])
+        symbols = item.get("symbols", [])
+        if len(confs) > 0 and not isinstance(confs[0], np.ndarray):
+            if _HAVE_RDKIT:
+                merged = []
+                for c in confs:
+                    merged += _to_coord_list_from_rdkit_mol(c)
+                confs = merged
             else:
-                raise ValueError('Fail to get dataset bond info.')
+                raise ValueError("Found RDKit Mol in dict['confs'] but RDKit is not installed.")
+        return confs, symbols
+    # List of arrays
+    if isinstance(item, list) and (len(item) == 0 or isinstance(item[0], np.ndarray)):
+        return item, symbols
+    # RDKit Mol / List[Mol]
+    if _HAVE_RDKIT:
+        if isinstance(item, Chem.Mol) or (isinstance(item, list) and (len(item) == 0 or isinstance(item[0], Chem.Mol))):
+            return _to_coord_list_from_rdkit_mol(item), symbols
+    # Fallback
+    return [], symbols
 
-            o = max(0, order)
-            while o > 0 and (not _can_accept(nr_bonds[i], a1, o) or not _can_accept(nr_bonds[j], a2, o)):
-                o -= 1
+def _pairwise_min_rmsd(pred_confs: CoordList, gt_confs: CoordList) -> Tuple[Array, Array]:
+    """
+    Returns:
+      - min_pred_to_gt[i]: RMSD from i-th predicted conformer to its closest GT conformer
+      - min_gt_to_pred[j]: RMSD from j-th GT conformer to its closest predicted conformer
+    """
+    P, K = len(pred_confs), len(gt_confs)
+    if P == 0 or K == 0:
+        return np.full(P, np.inf), np.full(K, np.inf)
+    dmat = np.zeros((P, K), dtype=float)
+    for i, p in enumerate(pred_confs):
+        for j, g in enumerate(gt_confs):
+            if p.shape[0] != g.shape[0]:
+                raise ValueError("Atom count mismatch between a pred and a GT conformer.")
+            dmat[i, j] = _kabsch_rmsd(p, g)
+    return dmat.min(axis=1), dmat.min(axis=0)
 
-            if o > 0:
-                rwmol.AddBond(i, j, bond_list[o])
-                nr_bonds[i] += o
-                nr_bonds[j] += o
+def _cov_amr(min_dists: Array, threshold: float) -> Tuple[float, float]:
+    """Coverage (fraction < threshold) and AMR (mean of distances)."""
+    finite = np.isfinite(min_dists)
+    if not finite.any():
+        return 0.0, float("inf")
+    d = min_dists[finite]
+    cov = float(np.mean((d < threshold).astype(float)))
+    amr = float(np.mean(d))
+    return cov, amr
 
-    # finalize to Mol and sanitize so downstream AddHs/validity checks don't crash
-    mol = rwmol.GetMol()
-    mol = _safe_sanitize(mol)
+# ---------------------- input normalization helpers ----------------------
 
-    nr_stable_bonds = 0
-    for atom_type_i, nr_bonds_i in zip(atoms, nr_bonds):
-        possible_bonds = allowed_bonds[atom_type_i]
-        if isinstance(possible_bonds, int):
-            is_stable = (nr_bonds_i == possible_bonds)
-        else:
-            is_stable = (nr_bonds_i in possible_bonds)
-        if not is_stable and debug:
-            print(
-                f"Invalid bonds for atom {atom_type_i} with {nr_bonds_i} total order")
-        nr_stable_bonds += int(is_stable)
+def _maybe_unwrap_tuple(obj):
+    """Unwrap only if root is a tuple and obj[0] is list/tuple (classic (pred_list, aux))."""
+    if isinstance(obj, tuple) and len(obj) >= 1 and isinstance(obj[0], (list, tuple)):
+        return list(obj[0])
+    return obj
 
-    molecule_stable = (nr_stable_bonds == len(x))
-    return molecule_stable, nr_stable_bonds, len(x), mol
+def _normalize_pack(obj):
+    """Coerce various pickle roots into a list aligned by molecule."""
+    obj = _maybe_unwrap_tuple(obj)
 
+    if isinstance(obj, (list, tuple)):
+        return list(obj)
 
-def get_3D_edm_metric(predict_mols, train_mols=None, dataset_name='QM9', use_mmff=False):
-    train_smiles = None
-    if train_mols is not None:
-        train_smiles = [Chem.MolToSmiles(mol) for mol in train_mols]
+    if isinstance(obj, np.ndarray):
+        if obj.dtype == object:
+            return list(obj.tolist())
+        raise TypeError(f"Unsupported numpy dtype at root: {obj.dtype}")
 
-    molecule_stable = 0
-    nr_stable_bonds = 0
-    n_atoms = 0
-
-    rd_mols = []
-    for mol in tqdm(predict_mols):
-        pos = mol.GetConformer(0).GetPositions()
-        pos = pos - pos.mean(axis=0)
-        atom_type = [atom.GetSymbol() for atom in mol.GetAtoms()]
+    if isinstance(obj, dict):
+        # single molecule dict
+        if 'symbols' in obj and 'confs' in obj:
+            return [obj]
+        # mapping id->entry
         try:
-            validity_res = check_3D_stability(
-                pos, atom_type, dataset_name, rdmol=mol, use_mmff=use_mmff, debug=False)
+            keys = sorted(obj.keys(), key=lambda x: int(x))
         except Exception:
-            print('Check stability failed.')
-            validity_res = [0, 0, mol.GetNumAtoms(), mol]
+            keys = list(obj.keys())
+        return [obj[k] for k in keys]
 
-        molecule_stable += int(validity_res[0])
-        nr_stable_bonds += int(validity_res[1])
-        n_atoms += int(validity_res[2])
-        rd_mols.append(validity_res[3])
+    try:
+        import pandas as pd
+        if 'DataFrame' in str(type(obj)):
+            if 'symbols' in obj.columns and 'confs' in obj.columns:
+                return obj[['symbols', 'confs']].to_dict('records')
+    except Exception:
+        pass
 
-    fraction_mol_stable = molecule_stable / float(len(predict_mols))
-    fraction_atm_stable = nr_stable_bonds / float(n_atoms)
+    raise TypeError(f"Unsupported pickle root type: {type(obj)}")
 
-    output_dict = {
-        'mol_stable': fraction_mol_stable,
-        'atom_stable': fraction_atm_stable,
+# ---------------------- core evaluator (matches keys) ----------------------
+
+def conformer_evaluation_V2(
+    predict_pack: Any,
+    gt_pack: Any,
+    threshold: float,
+    num_failures: int = 0,
+    logger: Any = None,
+    num_process: int = 1,
+    dataset_name: str = ""
+) -> Dict[str, float]:
+    """
+    Standalone version mirroring NExT-Mol's evaluation outputs.
+    Required outputs (keys):
+      recall_coverage_mean/median, recall_amr_mean/median,
+      precision_coverage_mean/median, precision_amr_mean/median
+    """
+    predict_pack = _normalize_pack(predict_pack)
+    gt_pack      = _normalize_pack(gt_pack)
+
+    # align lengths to the minimum to avoid assertion when one side is shorter
+    n = min(len(predict_pack), len(gt_pack))
+    if len(predict_pack) != len(gt_pack):
+        print(f"[info] length mismatch: predict={len(predict_pack)}, gt={len(gt_pack)}; "
+              f"evaluating on the first {n} pairs.")
+    predict_pack = predict_pack[:n]
+    gt_pack      = gt_pack[:n]
+
+    rec_cov_list, rec_amr_list, pre_cov_list, pre_amr_list = [], [], [], []
+    skipped = 0
+
+    for idx, (pred_item, gt_item) in enumerate(zip(predict_pack, gt_pack)):
+        pred_confs, _ = _to_coord_list(pred_item)
+        gt_confs, _ = _to_coord_list(gt_item)
+
+        if len(pred_confs) == 0 or len(gt_confs) == 0:
+            skipped += 1
+            continue
+
+        min_pred_to_gt, min_gt_to_pred = _pairwise_min_rmsd(pred_confs, gt_confs)
+
+        # Precision direction: pred -> gt
+        cov_p, amr_p = _cov_amr(min_pred_to_gt, threshold)
+        # Recall direction: gt -> pred
+        cov_r, amr_r = _cov_amr(min_gt_to_pred, threshold)
+
+        pre_cov_list.append(cov_p); pre_amr_list.append(amr_p)
+        rec_cov_list.append(cov_r); rec_amr_list.append(amr_r)
+
+    def _mean_and_median(xs: List[float]) -> Tuple[float, float]:
+        if len(xs) == 0:
+            return 0.0, 0.0
+        arr = np.array(xs, dtype=float)
+        return float(arr.mean()), float(np.median(arr))
+
+    rec_cov_mean, rec_cov_median = _mean_and_median(rec_cov_list)
+    rec_amr_mean, rec_amr_median = _mean_and_median(rec_amr_list)
+    pre_cov_mean, pre_cov_median = _mean_and_median(pre_cov_list)
+    pre_amr_mean, pre_amr_median = _mean_and_median(pre_amr_list)
+
+    metrics = {
+        "recall_coverage_mean":   rec_cov_mean,
+        "recall_coverage_median": rec_cov_median,
+        "recall_amr_mean":        rec_amr_mean,
+        "recall_amr_median":      rec_amr_median,
+        "precision_coverage_mean":   pre_cov_mean,
+        "precision_coverage_median": pre_cov_median,
+        "precision_amr_mean":        pre_amr_mean,
+        "precision_amr_median":      pre_amr_median,
     }
+    if skipped > 0:
+        metrics["_skipped"] = skipped
+    return metrics
 
-    rdkit_dict = eval_rdmol(rd_mols, train_smiles)
-    output_dict.update(rdkit_dict)
-    return output_dict, rd_mols
+# --------------------------- CLI (close to theirs) ---------------------------
 
+def main(args):
+    # dataset threshold defaults
+    if args.threshold is None:
+        if args.dataset == 'QM9-df':
+            threshold = 0.5
+        elif args.dataset == 'Geom-drugs-df':
+            threshold = 0.75
+        else:
+            threshold = 0.75
+    else:
+        threshold = float(args.threshold)
 
-def get_3D_edm_metric_batch(predict_mols, train_mols=None, dataset_name='QM9'):
-    train_smiles = None
-    if train_mols is not None:
-        train_smiles = [Chem.MolToSmiles(mol) for mol in train_mols]
+    with open(args.input, 'rb') as f:
+        predict_pack = pickle.load(f)
+    with open(args.gt, 'rb') as f:
+        gt_pack = pickle.load(f)
 
-    molecule_stable = 0
-    nr_stable_bonds = 0
-    n_atoms = 0
+    metrics = conformer_evaluation_V2(
+        predict_pack,
+        gt_pack,
+        threshold=threshold,
+        num_failures=0,
+        logger=None,
+        num_process=args.num_process,
+        dataset_name=args.dataset
+    )
 
-    rd_mols = []
-    predict_mols = [predict_mols[i:i+10]
-                    for i in range(0, len(predict_mols), 10)]
-    for mol_list in tqdm(predict_mols):
-        validity_res_list = []
-        smiles = [Chem.MolToSmiles(mol) for mol in mol_list]
-        assert len(set(smiles)) == 1
+    print("\n--------------------------")
+    for metric in [
+        'recall_coverage_mean', 'recall_coverage_median',
+        'recall_amr_mean', 'recall_amr_median',
+        'precision_coverage_mean', 'precision_coverage_median',
+        'precision_amr_mean', 'precision_amr_median'
+    ]:
+        print(metric, metrics[metric])
+    if "_skipped" in metrics:
+        print("_skipped", metrics["_skipped"])
+    print('--------------------------')
 
-        for mol in mol_list:
-            pos = mol.GetConformer(0).GetPositions()
-            pos = pos - pos.mean(axis=0)
-            atom_type = [atom.GetSymbol() for atom in mol.GetAtoms()]
-            validity_res = check_3D_stability(
-                pos, atom_type, dataset_name, rdmol=mol)
-            validity_res_list.append(validity_res)
-        max_validity_res = max(validity_res_list, key=lambda x: x[0])
-        molecule_stable += int(max_validity_res[0])
-        nr_stable_bonds += int(max_validity_res[1])
-        n_atoms += int(max_validity_res[2])
-        rd_mols.append(max_validity_res[3])
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--input', type=str, required=True, help='path to predict.pkl')
+    parser.add_argument('--gt', type=str, required=True, help='path to ground-truth conformers pickle')
+    parser.add_argument('--dataset', type=str, default='QM9-df', choices=['QM9-df', 'Geom-drugs-df'])
+    parser.add_argument('--num_process', type=int, default=1)
+    parser.add_argument('--threshold', type=float, default=None, help='override default threshold')
+    args = parser.parse_args()
 
-    fraction_mol_stable = molecule_stable / float(len(predict_mols))
-    fraction_atm_stable = nr_stable_bonds / float(n_atoms)
-
-    output_dict = {
-        'mol_stable': fraction_mol_stable,
-        'atom_stable': fraction_atm_stable,
-    }
-
-    rdkit_dict = eval_rdmol(rd_mols, train_smiles)
-    output_dict.update(rdkit_dict)
-    return output_dict
-
-
-# def get_moses_metrics(test_mols, n_jobs=1, device='cpu', batch_size=2000, ptest_pool=None, cache_path=None):
-#     ...
-#     return moses_metrics
-
-
-def get_sub_geometry_metric(test_mols, dataset_info, root_path):
-    tar_geo_stat = load_target_geometry(test_mols, dataset_info, root_path)
-
-    def sub_geometry_metric(gen_mols):
-        bond_length_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_bond_distance, dataset_info[
-                'top_bond_sym'], mean_name='bond_length_mean'
-        )
-        bond_angle_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_bond_angle, dataset_info[
-                'top_angle_sym'], mean_name='bond_angle_mean'
-        )
-        dihedral_angle_dict = compute_geo_mmd(
-            gen_mols, tar_geo_stat, cal_dihedral_angle, dataset_info[
-                'top_dihedral_sym'], mean_name='dihedral_angle_mean'
-        )
-        metric = {**bond_length_dict, **bond_angle_dict, **dihedral_angle_dict}
-        return metric
-
-    return sub_geometry_metric
+    print("=========================================")
+    for k, v in sorted(vars(args).items()):
+        print(k, '=', v)
+    print("=========================================")
+    main(args)

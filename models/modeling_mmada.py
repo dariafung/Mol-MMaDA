@@ -41,6 +41,7 @@ def _pairwise_distances(coords: torch.Tensor, mask: torch.Tensor) -> Tuple[torch
 
 
 def _kabsch_align(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
+    """Use torch.linalg.svd instead of deprecated torch.svd."""
     B, N, _ = pred.shape
     centroid_pred = (pred * mask.unsqueeze(-1)).sum(1,
                                                     keepdim=True) / (mask.sum(1, keepdim=True) + 1e-8)
@@ -48,13 +49,15 @@ def _kabsch_align(pred: torch.Tensor, gt: torch.Tensor, mask: torch.Tensor) -> t
         (mask.sum(1, keepdim=True) + 1e-8)
     P = pred - centroid_pred
     G = gt - centroid_gt
-    C = torch.matmul(P.transpose(2, 1), G)
-    V, S, W = torch.svd(C)
-    d = torch.det(torch.matmul(W, V.transpose(2, 1))
-                  ).unsqueeze(-1).unsqueeze(-1)
-    D = torch.diag_embed(torch.ones(B, 3, device=pred.device))
-    D[:, -1, -1] = d.squeeze()
-    R = torch.matmul(torch.matmul(W, D), V.transpose(2, 1))
+    C = torch.matmul(P.transpose(2, 1), G)          # (B,3,3)
+
+    # torch.linalg.svd returns U, S, Vh so that C = U @ diag(S) @ Vh
+    U, S, Vh = torch.linalg.svd(C)
+    # Ensure right-handed rotation (determinant +1)
+    det = torch.det(U @ Vh)
+    D = torch.eye(3, device=pred.device).unsqueeze(0).repeat(B, 1, 1)
+    D[:, -1, -1] = torch.sign(det)
+    R = U @ D @ Vh
     return torch.matmul(P, R) + centroid_gt
 
 
@@ -164,8 +167,7 @@ class MMadaModelLM(PreTrainedModel):
 
         # timestep conditioning
         self.timestep_sinus = SinusoidalPositionalEmbedding(
-            config.final_condition_dim, init_range=config.diffusion_timesteps
-        )
+            config.final_condition_dim, init_range=config.diffusion_timesteps)
         self.timestep_mlp = nn.Sequential(
             nn.Linear(config.final_condition_dim, config.final_condition_dim),
             nn.SiLU(),
@@ -231,10 +233,7 @@ class MMadaModelLM(PreTrainedModel):
             attention_mask = selfies_attention_mask
 
         vocab_size = self.llm_backbone.get_input_embeddings().weight.size(0)
-        for name, tensor in [("selfies_input_ids", selfies_input_ids)] + (
-            [("text_input_ids", text_input_ids)
-             ] if text_input_ids is not None else []
-        ):
+        for name, tensor in [("selfies_input_ids", selfies_input_ids)] + ([("text_input_ids", text_input_ids)] if text_input_ids is not None else []):
             if tensor is not None and (tensor >= vocab_size).any():
                 bad = tensor[tensor >= vocab_size].unique().tolist()[:5]
                 raise ValueError(
@@ -267,17 +266,14 @@ class MMadaModelLM(PreTrainedModel):
 
         B = cond.size(0)
         pred_coords = self.coordinates_prediction_head(cond).view(
-            B, self.config.max_atoms, self.config.output_atom_coords_dim
-        )
+            B, self.config.max_atoms, self.config.output_atom_coords_dim)
         pred_atom_logits = self.atom_type_prediction_head(cond).view(
-            B, self.config.max_atoms, self.config.output_atom_type_dim
-        )
+            B, self.config.max_atoms, self.config.output_atom_type_dim)
         pred_props = self.properties_head(cond)
 
         return {
             "selfies_logits": selfies_logits,
-            # interpreted as epsilon in diffusion
-            "predicted_coordinates": pred_coords,
+            "predicted_coordinates": pred_coords,            # epsilon if diffusion head
             "predicted_atom_type_logits": pred_atom_logits,
             "pred_props": pred_props,
             "selfies_context_embeds": selfies_ctx,
@@ -286,140 +282,6 @@ class MMadaModelLM(PreTrainedModel):
             "hidden_states": hidden if output_hidden_states else None,
             "llm_output_logits": llm_out.logits,
         }
-
-    def forward_process(
-        self,
-        selfies_input_ids: torch.LongTensor,
-        selfies_attention_mask: torch.LongTensor,
-        atom_vec: torch.LongTensor,
-        coordinates: torch.FloatTensor,
-        atoms_mask: torch.BoolTensor,
-        task_type: str,
-        true_coordinates: torch.FloatTensor,
-        true_atom_vec: torch.LongTensor,
-        mask_schedule_coords: Callable,
-        text_input_ids: Optional[torch.LongTensor] = None,
-        text_attention_mask: Optional[torch.LongTensor] = None,
-        true_selfies_labels: Optional[torch.LongTensor] = None,
-        timesteps: Optional[torch.LongTensor] = None,
-        global_step: Optional[int] = None,
-        **kwargs,
-    ) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        B = coordinates.size(0)
-        device = coordinates.device
-
-        if timesteps is None:
-            timesteps = torch.randint(
-                0, self.config.diffusion_timesteps, (B,), device=device).long()
-        timesteps = timesteps.view(-1)
-
-        # Construct x_t and train epsilon prediction
-        sqrt_alpha_bar = mask_schedule_coords(
-            timesteps.long()).clamp(0.0, 1.0).view(-1, 1, 1)
-        alpha_bar = (sqrt_alpha_bar ** 2).clamp(0.0, 1.0)
-        sqrt_one_minus_alpha_bar = torch.sqrt(
-            (1.0 - alpha_bar).clamp(min=1e-8))
-        noise_gt = torch.randn_like(true_coordinates)
-        pos_0 = true_coordinates
-        pos_t = sqrt_alpha_bar * pos_0 + sqrt_one_minus_alpha_bar * noise_gt
-
-        out = self.forward(
-            selfies_input_ids=selfies_input_ids,
-            selfies_attention_mask=selfies_attention_mask,
-            atom_vec=atom_vec,
-            coordinates=pos_t,                # feed x_t
-            atoms_mask=atoms_mask,
-            text_input_ids=text_input_ids,
-            text_attention_mask=text_attention_mask,
-            timesteps=timesteps,
-            output_hidden_states=True,
-            return_dict=True,
-        )
-
-        pred_eps: torch.Tensor = out["predicted_coordinates"]
-        pred_atom_logits: torch.Tensor = out["predicted_atom_type_logits"]
-        selfies_logits: torch.Tensor = out["selfies_logits"]
-        pred_props: torch.Tensor = out.get("pred_props", None)
-
-        losses: Dict[str, torch.Tensor] = {}
-        total_loss = torch.tensor(0.0, device=device)
-
-        if self.config.lm_coeff and true_selfies_labels is not None:
-            lm_loss = F.cross_entropy(
-                selfies_logits.reshape(-1, selfies_logits.size(-1)),
-                true_selfies_labels.reshape(-1),
-                ignore_index=-100,
-            )
-            losses["lm_loss"] = lm_loss * self.config.lm_coeff
-
-        if self.config.diff_coeff:
-            mask3 = atoms_mask.unsqueeze(-1).float()
-            diff_mse = F.mse_loss(
-                pred_eps * mask3, noise_gt * mask3, reduction="sum") / (mask3.sum() + 1e-5)
-            losses["diff_loss"] = diff_mse * self.config.diff_coeff
-
-        if self.config.mae_coeff and (pred_props is not None) and ("true_props" in kwargs):
-            true_props: torch.Tensor = kwargs["true_props"]
-            if true_props is not None and true_props.numel() > 0:
-                if true_props.dim() == 1:
-                    true_props = true_props.unsqueeze(0)
-                mask = ~torch.isnan(true_props)
-                if mask.any():
-                    mae_loss = F.l1_loss(
-                        pred_props[mask], true_props[mask], reduction="mean")
-                    losses["mae_loss"] = mae_loss * self.config.mae_coeff
-
-        if self.config.atom_type_coeff:
-            valid_idx = atoms_mask
-            if valid_idx.any():
-                flat_logits = pred_atom_logits[valid_idx].view(
-                    -1, pred_atom_logits.size(-1))
-                flat_labels = true_atom_vec[valid_idx].view(-1)
-                at_loss = F.cross_entropy(flat_logits, flat_labels)
-            else:
-                at_loss = torch.tensor(0.0, device=device)
-            losses["atom_type_loss"] = at_loss * self.config.atom_type_coeff
-
-        # Add simple chemical constraint loss
-        if hasattr(self.config, 'chemical_coeff') and self.config.chemical_coeff > 0:
-            chemical_loss = self._compute_chemical_constraint_loss(
-                true_coordinates, true_atom_vec, atoms_mask)
-            losses["chemical_loss"] = chemical_loss * \
-                self.config.chemical_coeff
-
-        if not losses:
-            return total_loss, {}
-        total_loss = sum(losses.values())
-        return total_loss, losses
-
-    def _compute_chemical_constraint_loss(self, coordinates: torch.Tensor, atom_types: torch.Tensor, mask: torch.Tensor) -> torch.Tensor:
-        """Simple chemical constraint loss to encourage reasonable bond lengths"""
-        batch_size, max_atoms = coordinates.shape[:2]
-        total_loss = 0.0
-        total_pairs = 0
-
-        for b in range(batch_size):
-            valid_mask = mask[b]
-            if valid_mask.sum() < 2:
-                continue
-
-            valid_coords = coordinates[b][valid_mask]
-            n_atoms = valid_coords.shape[0]
-
-            # Check distances between all atom pairs
-            for i in range(n_atoms):
-                for j in range(i + 1, n_atoms):
-                    dist = torch.norm(valid_coords[i] - valid_coords[j])
-
-                    # Penalize distances that are too close (< 0.5) or too far (> 5.0)
-                    if dist < 0.5:
-                        total_loss += (0.5 - dist) ** 2
-                    elif dist > 5.0:
-                        total_loss += (dist - 5.0) ** 2
-
-                    total_pairs += 1
-
-        return total_loss / max(total_pairs, 1)
 
     @torch.no_grad()
     def generate_molecule(
@@ -454,7 +316,7 @@ class MMadaModelLM(PreTrainedModel):
         smiles, mol = None, None
         try:
             import selfies as sf
-            import rdkit.Chem as Chem
+            from rdkit import Chem
             smiles = sf.decoder(seq)
             mol = Chem.MolFromSmiles(smiles)
         except Exception:
@@ -481,9 +343,6 @@ class MMadaModelLM(PreTrainedModel):
         selfies_attention_mask = torch.ones(
             (B, 1), dtype=torch.long, device=device)
 
-        text_input_ids = None
-        text_attention_mask = None
-
         atom_vec = torch.zeros(B, K, dtype=torch.long, device=device)
         coordinates = torch.zeros(B, K, 3, dtype=torch.float32, device=device)
         atoms_mask = torch.ones(B, K, dtype=torch.bool, device=device)
@@ -494,8 +353,8 @@ class MMadaModelLM(PreTrainedModel):
             atom_vec=atom_vec,
             coordinates=coordinates,
             atoms_mask=atoms_mask,
-            text_input_ids=text_input_ids,
-            text_attention_mask=text_attention_mask,
+            text_input_ids=None,
+            text_attention_mask=None,
             timesteps=None,
             output_hidden_states=False,
             return_dict=True,
@@ -531,7 +390,12 @@ class MMadaModelLM(PreTrainedModel):
         scheduler_name: Optional[str] = None,
         predicts_eps: bool = True,
         commit_class0: bool = False,
+        input_selfies: Optional[list] = None,
+        selfies_tensors: Optional[Tuple[torch.Tensor, torch.Tensor]] = None,
     ) -> Dict[str, torch.Tensor]:
+        """
+        NOTE: Now pre-tokenizes SELFIES once (outside the reverse loop) and passes tensors to _predict_step.
+        """
         self.eval()
         B, K = batch_size, max_atoms
         T = int(t_steps or self.config.diffusion_timesteps)
@@ -540,6 +404,35 @@ class MMadaModelLM(PreTrainedModel):
         x_t = torch.randn(
             B, K, self.config.output_atom_coords_dim, device=device)
         atoms_mask = torch.ones(B, K, dtype=torch.bool, device=device)
+
+        # ---- pre-tokenize SELFIES once ----
+        if selfies_tensors is not None:
+            selfies_input_ids, selfies_attention_mask = selfies_tensors
+            selfies_input_ids = selfies_input_ids.to(device)
+            selfies_attention_mask = selfies_attention_mask.to(device)
+        else:
+            pad_id = self.tokenizer.pad_token_id or (
+                self.tokenizer.eos_token_id or 0)
+            if input_selfies is not None and len(input_selfies) > 0:
+                toks = [
+                    self.tokenizer(
+                        s,
+                        truncation=True,
+                        max_length=self.config.max_selfies_length,
+                        padding="max_length",
+                        return_tensors="pt",
+                    )
+                    for s in input_selfies
+                ]
+                selfies_input_ids = torch.stack(
+                    [t.input_ids[0] for t in toks]).to(device)
+                selfies_attention_mask = torch.stack(
+                    [t.attention_mask[0] for t in toks]).to(device)
+            else:
+                selfies_input_ids = torch.full(
+                    (B, 1), pad_id, dtype=torch.long, device=device)
+                selfies_attention_mask = torch.ones(
+                    (B, 1), dtype=torch.long, device=device)
 
         sqrt_ab_fn = get_noise_schedule(
             name=(scheduler_name or getattr(
@@ -561,10 +454,12 @@ class MMadaModelLM(PreTrainedModel):
                 guidance_scale=guidance_scale,
                 temperature=temperature,
                 predicts_eps=predicts_eps,
+                # pass pre-tokenized tensors (no per-step tokenization anymore)
+                selfies_input_ids=selfies_input_ids,
+                selfies_attention_mask=selfies_attention_mask,
             )
             type_logits = pred["type_logits"]
-            # epsilon if predicts_eps=True else x0
-            coord_pred = pred["coord_pred"]
+            coord_pred = pred["coord_pred"]  # eps if predicts_eps else x0
 
             sqrt_a_t = sqrt_ab_fn(t).clamp(0.0, 1.0).view(B, 1, 1)
             a_t = (sqrt_a_t ** 2).clamp(0.0, 1.0)
@@ -591,9 +486,8 @@ class MMadaModelLM(PreTrainedModel):
 
             undecided = (atom_idx == 0) & atoms_mask
             if undecided.any():
-                logits = type_logits
+                logits = type_logits.clone()
                 if not commit_class0:
-                    logits = logits.clone()
                     logits[..., 0] = logits[..., 0] - 1e9
 
                 probs = F.softmax(
@@ -632,17 +526,42 @@ class MMadaModelLM(PreTrainedModel):
         guidance_scale: float = 1.0,
         temperature: float = 1.0,
         predicts_eps: bool = True,
+        # NEW: prefer pre-tokenized tensors
+        selfies_input_ids: Optional[torch.Tensor] = None,
+        selfies_attention_mask: Optional[torch.Tensor] = None,
+        # legacy fallback (kept for compatibility; not used in new path)
+        input_selfies: Optional[list] = None,
     ) -> Dict[str, torch.Tensor]:
         B, K = atom_idx.shape
         device = x_t.device
 
-        pad_id = self.tokenizer.pad_token_id
-        if pad_id is None:
-            pad_id = self.tokenizer.eos_token_id if self.tokenizer.eos_token_id is not None else 0
-        selfies_input_ids = torch.full(
-            (B, 1), pad_id, dtype=torch.long, device=device)
-        selfies_attention_mask = torch.ones(
-            (B, 1), dtype=torch.long, device=device)
+        # Prefer already-tokenized inputs (prepared once in sample_diffusion)
+        if selfies_input_ids is None or selfies_attention_mask is None:
+            pad_id = self.tokenizer.pad_token_id or (
+                self.tokenizer.eos_token_id or 0)
+            if input_selfies is not None and len(input_selfies) > 0:
+                toks = [
+                    self.tokenizer(
+                        s,
+                        truncation=True,
+                        max_length=self.config.max_selfies_length,
+                        padding="max_length",
+                        return_tensors="pt",
+                    )
+                    for s in input_selfies
+                ]
+                selfies_input_ids = torch.stack(
+                    [t.input_ids[0] for t in toks]).to(device)
+                selfies_attention_mask = torch.stack(
+                    [t.attention_mask[0] for t in toks]).to(device)
+            else:
+                selfies_input_ids = torch.full(
+                    (B, 1), pad_id, dtype=torch.long, device=device)
+                selfies_attention_mask = torch.ones(
+                    (B, 1), dtype=torch.long, device=device)
+        else:
+            selfies_input_ids = selfies_input_ids.to(device)
+            selfies_attention_mask = selfies_attention_mask.to(device)
 
         out = self.forward(
             selfies_input_ids=selfies_input_ids,
@@ -658,7 +577,6 @@ class MMadaModelLM(PreTrainedModel):
         )
         type_logits = out["predicted_atom_type_logits"][:, :K, :]
         pred_coords = out["predicted_coordinates"][:, :K, :]
-
         coord_pred = pred_coords.to(x_t.dtype)
         return {"type_logits": type_logits, "coord_pred": coord_pred}
 

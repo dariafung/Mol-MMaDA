@@ -1,29 +1,25 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Generate molecules with diffusion sampling and save as a Parquet file with *only real atoms*.
+Generate 3D molecular conformations from 1D molecular inputs (SELFIES/SMILES) using diffusion sampling.
 
-- Remove padding atoms (type==0 or masked-out).
-- Drop all-zero/origin coords (0,0,0) that often come from padding.
-- De-duplicate coincident coordinates within a tolerance (eps).
-- Optionally restrict to QM9 element set {H,C,N,O,F} -> {1,6,7,8,9}.
-- (Optional) Cap number of kept atoms (e.g., 32) without retraining.
-- Save rows as {'types': [int...], 'coords': [[x,y,z]...]}.
+Key changes vs your last draft:
+- Removed dynamic cap based on SELFIES atom-count estimation.
+- Do not print per-batch atom counts to keep logs clean.
+- Keep mask/type0/origin_eps/QM9 cleanup in postprocess_atoms; final N alignment happens later in parquet->pkl step.
 
-Examples:
-  # Smoke test (no model)
-  python generate.py --dummy --num 10 --out /tmp/demo.parquet
-
-  # Real diffusion sampling (requires your trained checkpoint dir + the training YAML)
+Usage example:
   python generate.py \
     --ckpt /work/.../final_checkpoint \
     --config configs/mmada_pretraining_stage1_llada_instruct.yaml \
     --gen-config configs/generate_mmada_diffusion.yaml \
     --device cuda \
-    --num 10000 \
+    --input-selfies /projects/bezp/yfeng7/data/qm9_order.selfies \
     --batch-size 64 \
-    --max-atoms 32 \
-    --out /work/.../generated_mols.parquet
+    --dataset QM9 \
+    --cap 0 \
+    --out /projects/bezp/yfeng7/data/predicted_conformations_full.parquet \
+    --require-diffusion
 """
 import argparse
 import glob
@@ -57,7 +53,6 @@ except Exception:
     get_semantic_robust_alphabet = None
     MMadaModelLM = None
     MMadaConfig = None
-
 
 # Default compact idx (0..5) -> atomic number Z  (0=pad/mask)
 DEFAULT_IDX2Z = np.array([0, 1, 6, 7, 8, 9], dtype=np.int64)
@@ -93,28 +88,22 @@ def _load_gen_cfg(gen_cfg_path: Optional[str]) -> Dict:
     """
     defaults = {
         "seed": None,
-        "t_steps": None,           # if None, use training config's diffusion_timesteps
-        # for classifier-free guidance (if model supports)
+        "t_steps": None,
         "guidance_scale": 1.0,
-        "type_conf_frac": 0.15,    # fraction of undecided type positions to decode per step
-        # top-k sampling for types (if model supports)
+        "type_conf_frac": 0.15,
         "type_topk": 3,
-        # softmax temperature for types (if model supports)
         "temperature": 1.0,
-        "scheduler_name": None,    # override noise schedule name if you like
-        "idx2z": None,             # override compact->Z mapping
+        "scheduler_name": None,
+        "idx2z": None,
         "commit_class0": True,
     }
     if not gen_cfg_path:
         return {"generation": defaults}
-
     with open(gen_cfg_path, "r") as f:
         cfg = yaml.safe_load(f) or {}
-
     gen = cfg.get("generation", {})
     out = defaults.copy()
     out.update({k: gen.get(k, v) for k, v in defaults.items()})
-
     return {"generation": out}
 
 
@@ -129,9 +118,13 @@ def postprocess_atoms(
     drop_nonfinite: bool = True,
     drop_type0: bool = True,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """Clean one molecule.
-
-    Returns (types, coords) or (None, None) if nothing remains after cleaning.
+    """
+    Clean one molecule. Returns (types, coords) or (None, None) if nothing remains.
+    - Removes padding via mask and type==0
+    - Drops near-origin and non-finite coords
+    - Keeps only QM9 elements when dataset='QM9'
+    - Optional coordinate dedup within 'dedup_eps'
+    - Optional cap (>0) to truncate to first 'cap' atoms
     """
     atom_types = np.asarray(atom_types, dtype=np.int64).reshape(-1)
     coords = np.asarray(coords, dtype=np.float32)
@@ -184,7 +177,6 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
     """Lazy-load model/tokenizer once."""
     if _STATE["model"] is not None:
         return
-
     if torch is None:
         raise RuntimeError(
             "PyTorch is required for real sampling. Use --dummy for a smoke test.")
@@ -267,8 +259,7 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
     candidates += glob.glob(os.path.join(ckpt_dir, "pytorch_model_*.bin"))
     if not candidates:
         raise FileNotFoundError(
-            f"No model weights found in {ckpt_dir}. "
-            "Expected one of: model.safetensors, pytorch_model.bin, pytorch_model_*.bin"
+            f"No model weights found in {ckpt_dir}. Expected one of: model.safetensors, pytorch_model.bin, pytorch_model_*.bin"
         )
 
     weights_path = sorted(candidates)[0]
@@ -304,7 +295,7 @@ def _filter_kwargs_for_func(func, kwargs: Dict) -> Dict:
         allowed = set(sig.parameters.keys())
         return {k: v for k, v in kwargs.items() if k in allowed}
     except Exception:
-        return {}  # be safe
+        return {}
 
 
 def sample_batch(
@@ -314,17 +305,19 @@ def sample_batch(
     gen_params: Optional[Dict] = None,
     **kwargs
 ) -> Dict[str, "np.ndarray"]:
-    """Bridge to your trained model diffusion sampler (B: require-diffusion option)."""
+    """Generate 3D conformations from 1D molecular inputs (SELFIES/SMILES)."""
     use_dummy = kwargs.pop("dummy", False)
     require_diffusion = kwargs.pop("require_diffusion", False)
+    input_selfies = kwargs.pop("input_selfies", None)  # optional conditioning
 
     if use_dummy:
         B = batch_size
-        t = np.zeros((B, max_atoms), dtype=np.int64)
-        c = np.zeros((B, max_atoms, 3), dtype=np.float32)
-        m = np.zeros((B, max_atoms), dtype=bool)
+        K = max_atoms
+        t = np.zeros((B, K), dtype=np.int64)
+        c = np.zeros((B, K, 3), dtype=np.float32)
+        m = np.zeros((B, K), dtype=bool)
         for b in range(B):
-            n = min(5, max_atoms)  # methane-like: 1C + 4H
+            n = min(5, K)  # methane-like mock
             t[b, :n] = np.array([6, 1, 1, 1, 1], dtype=np.int64)[:n]
             base = np.array([[0.12, 0.80, 0.10],
                              [0.12, 0.92, 0.10],
@@ -357,36 +350,23 @@ def sample_batch(
             raise RuntimeError(
                 "require-diffusion set but model has no sample_diffusion().")
 
-        # Logging which sampler is used and key params
+        # Prepare call kwargs
+        call_kwargs = dict(batch_size=batch_size,
+                           max_atoms=max_atoms, device=dev)
+        if gen_params:
+            call_kwargs.update(gen_params)
+        if input_selfies is not None:
+            # conditioning (if model supports)
+            call_kwargs["input_selfies"] = input_selfies
+
         print(
             f"[sampler-info] using: {'sample_diffusion' if use_diff else 'sample'}")
-        if use_diff and gen_params:
-            print("[sampler-params]",
-                  "t_steps=", gen_params.get("t_steps"),
-                  "guidance_scale=", gen_params.get("guidance_scale"),
-                  "type_conf_frac=", gen_params.get("type_conf_frac"),
-                  "type_topk=", gen_params.get("type_topk"),
-                  "temperature=", gen_params.get("temperature"),
-                  "scheduler_name=", gen_params.get("scheduler_name"))
-
-        # Prefer diffusion sampler; otherwise (if allowed) fallback
         if use_diff:
-            call_kwargs = dict(
-                batch_size=batch_size, max_atoms=max_atoms, device=dev
-            )
-            if gen_params:
-                call_kwargs.update(gen_params)
-            call_kwargs = _filter_kwargs_for_func(
-                model.sample_diffusion, call_kwargs)
-            out = model.sample_diffusion(**call_kwargs)
+            call = _filter_kwargs_for_func(model.sample_diffusion, call_kwargs)
+            out = model.sample_diffusion(**call)
         else:
-            call_kwargs = dict(
-                batch_size=batch_size, max_atoms=max_atoms, device=dev
-            )
-            if gen_params:
-                call_kwargs.update(gen_params)
-            call_kwargs = _filter_kwargs_for_func(model.sample, call_kwargs)
-            out = model.sample(**call_kwargs)
+            call = _filter_kwargs_for_func(model.sample, call_kwargs)
+            out = model.sample(**call)
 
         if "atom_idx" in out:
             atom_idx_t = out["atom_idx"].detach().clamp_(
@@ -411,21 +391,23 @@ def sample_batch(
 
 def main():
     p = argparse.ArgumentParser(
-        description="Generate molecules (diffusion) and save cleaned Parquet.")
+        description="Generate 3D conformations from 1D molecular inputs (1D→3D prediction).")
     p.add_argument("--ckpt", type=str, default="",
                    help="Path to model checkpoint directory.")
     p.add_argument("--config", type=str, default=None,
                    help="Training YAML to rebuild model/tokenizer.")
     p.add_argument("--gen-config", type=str, default=None,
                    help="Optional generation YAML (diffusion params).")
+    p.add_argument("--input-selfies", type=str, default=None,
+                   help="Path to input SELFIES/SMILES (one per line).")
     p.add_argument("--num", type=int, default=10000,
-                   help="Total number of molecules to generate.")
+                   help="Total number of molecules to generate if no --input-selfies.")
     p.add_argument("--batch-size", type=int, default=64,
                    help="Batch size for sampling.")
     p.add_argument("--device", type=str, default="cpu",
                    choices=["cpu", "cuda"])
     p.add_argument("--max-atoms", type=int, default=32,
-                   help="Model's max atoms (also used for --dummy).")
+                   help="Model's max atoms.")
     p.add_argument("--dataset", type=str, default="QM9",
                    choices=["QM9", "Geom"], help="Element set restriction.")
     p.add_argument("--out", type=str, required=True,
@@ -440,9 +422,8 @@ def main():
                    help="Use dummy sampler (no model needed).")
     p.add_argument("--print-every", type=int, default=2000,
                    help="Log every N accepted mols.")
-    # >>> B: 强制扩散开关
     p.add_argument("--require-diffusion", action="store_true",
-                   help="Fail if model.sample_diffusion is not available (do not fallback to sample()).")
+                   help="Fail if model.sample_diffusion is unavailable.")
     args = p.parse_args()
 
     if not args.dummy and not args.config:
@@ -456,6 +437,14 @@ def main():
 
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Load input list (one per line). Can be SELFIES or SMILES depending on your model.
+    input_selfies = None
+    if args.input_selfies:
+        with open(args.input_selfies, 'r') as f:
+            input_selfies = [line.strip() for line in f if line.strip()]
+        print(f"Loaded {len(input_selfies)} 1D inputs")
+        args.num = len(input_selfies)  # override
 
     rows = []
     accepted = 0
@@ -471,15 +460,13 @@ def main():
             dummy=args.dummy,
             ckpt=args.ckpt,
             config=args.config,
-            require_diffusion=args.require_diffusion,  # <<< 传入强制扩散
+            require_diffusion=args.require_diffusion,
+            input_selfies=input_selfies,  # pass through for conditioning if supported
         )
-        # (B, max_atoms) in atomic numbers
-        t = np.asarray(batch["types"], dtype=np.int64)
+        t = np.asarray(batch["types"], dtype=np.int64)        # (B, max_atoms)
         # (B, max_atoms, 3)
         c = np.asarray(batch["coords"], dtype=np.float32)
-        # (B, max_atoms)
-        m = np.asarray(batch.get("mask"), dtype=bool)
-
+        m = np.asarray(batch.get("mask"), dtype=bool)         # (B, max_atoms)
         B = t.shape[0]
         generated += B
 
@@ -490,7 +477,7 @@ def main():
                 dataset=args.dataset,
                 origin_eps=args.origin_eps,
                 dedup_eps=args.dedup_eps,
-                cap=args.cap,
+                cap=args.cap,   # IMPORTANT: set --cap 0 when calling to avoid truncation here
             )
             if tt is None:
                 continue
