@@ -5,7 +5,7 @@ generation:
   seed: 1234
   commit_class0: True
   # Diffusion / sampling steps
-  t_steps:  100       # 若为 null 则用训练配置里的 diffusion_timesteps
+  t_steps:  50
 
   # Classifier-Free Guidance (若模型支持)
   guidance_scale: 1.0

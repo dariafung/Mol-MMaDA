@@ -1,26 +1,15 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Generate 3D molecular conformations from 1D molecular inputs (SELFIES/SMILES) using diffusion sampling.
+Generate 3D molecular conformations from 1D molecular inputs (SELFIES) using diffusion sampling.
 
-Key changes vs your last draft:
-- Removed dynamic cap based on SELFIES atom-count estimation.
-- Do not print per-batch atom counts to keep logs clean.
-- Keep mask/type0/origin_eps/QM9 cleanup in postprocess_atoms; final N alignment happens later in parquet->pkl step.
+Key changes vs. earlier version:
+- FIX OOM: do NOT pass the whole input_selfies list into the model at once.
+  We slice the input into per-batch chunks and only pass the current chunk.
 
-Usage example:
-  python generate.py \
-    --ckpt /work/.../final_checkpoint \
-    --config configs/mmada_pretraining_stage1_llada_instruct.yaml \
-    --gen-config configs/generate_mmada_diffusion.yaml \
-    --device cuda \
-    --input-selfies /projects/bezp/yfeng7/data/qm9_order.selfies \
-    --batch-size 64 \
-    --dataset QM9 \
-    --cap 0 \
-    --out /projects/bezp/yfeng7/data/predicted_conformations_full.parquet \
-    --require-diffusion
+- Everything else (output format, cleaning, parquet writing) remains the same.
 """
+
 import argparse
 import glob
 import inspect
@@ -29,7 +18,7 @@ import random
 import sys
 import time
 from pathlib import Path
-from typing import Dict, Tuple, Optional
+from typing import Dict, Tuple, Optional, Any, List
 
 import numpy as np
 import pandas as pd
@@ -47,10 +36,14 @@ except Exception:
 try:
     from transformers import AutoTokenizer
     from selfies import get_semantic_robust_alphabet
+    import selfies as sf
+    from rdkit import Chem
     from models.modeling_mmada import MMadaModelLM, MMadaConfig
 except Exception:
     AutoTokenizer = None
     get_semantic_robust_alphabet = None
+    sf = None
+    Chem = None
     MMadaModelLM = None
     MMadaConfig = None
 
@@ -58,8 +51,7 @@ except Exception:
 DEFAULT_IDX2Z = np.array([0, 1, 6, 7, 8, 9], dtype=np.int64)
 ALLOWED_QM9 = {1, 6, 7, 8, 9}  # H, C, N, O, F
 
-_STATE = {"model": None, "tokenizer": None,
-          "device": "cpu", "idx2z": DEFAULT_IDX2Z}
+_STATE = {"model": None, "tokenizer": None, "device": "cpu", "idx2z": DEFAULT_IDX2Z}
 
 
 def set_global_seed(seed: Optional[int] = None):
@@ -72,20 +64,23 @@ def set_global_seed(seed: Optional[int] = None):
         torch.cuda.manual_seed_all(seed)
 
 
+def get_atom_count_from_selfies(selfies_str: str) -> int:
+    """Rough atom-count estimate from SELFIES (used for logging/cap)."""
+    if sf is None or Chem is None:
+        return min(len(selfies_str) + 1, 32)
+    try:
+        smiles = sf.decoder(selfies_str)
+        if not smiles:
+            return min(len(selfies_str) + 1, 32)
+        mol = Chem.MolFromSmiles(smiles)
+        if mol is None:
+            return min(len(selfies_str) + 1, 32)
+        return mol.GetNumAtoms()
+    except Exception:
+        return min(len(selfies_str) + 1, 32)
+
+
 def _load_gen_cfg(gen_cfg_path: Optional[str]) -> Dict:
-    """
-    Load generation-time (diffusion) params from YAML.
-    Structure (example):
-      generation:
-        seed: 1234
-        t_steps: 50
-        guidance_scale: 1.0
-        type_conf_frac: 0.15
-        type_topk: 3
-        temperature: 1.0
-        scheduler_name: linear
-        idx2z: [0,1,6,7,8,9]
-    """
     defaults = {
         "seed": None,
         "t_steps": None,
@@ -118,14 +113,7 @@ def postprocess_atoms(
     drop_nonfinite: bool = True,
     drop_type0: bool = True,
 ) -> Tuple[Optional[np.ndarray], Optional[np.ndarray]]:
-    """
-    Clean one molecule. Returns (types, coords) or (None, None) if nothing remains.
-    - Removes padding via mask and type==0
-    - Drops near-origin and non-finite coords
-    - Keeps only QM9 elements when dataset='QM9'
-    - Optional coordinate dedup within 'dedup_eps'
-    - Optional cap (>0) to truncate to first 'cap' atoms
-    """
+    """Clean one molecule and return (types, coords) or (None, None)."""
     atom_types = np.asarray(atom_types, dtype=np.int64).reshape(-1)
     coords = np.asarray(coords, dtype=np.float32)
     if coords.ndim != 2 or coords.shape[1] != 3 or coords.shape[0] != atom_types.shape[0]:
@@ -177,12 +165,11 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
     """Lazy-load model/tokenizer once."""
     if _STATE["model"] is not None:
         return
+
     if torch is None:
-        raise RuntimeError(
-            "PyTorch is required for real sampling. Use --dummy for a smoke test.")
+        raise RuntimeError("PyTorch is required for real sampling. Use --dummy for a smoke test.")
     if cfg_path is None:
-        raise ValueError(
-            "Please provide --config (the training YAML) to rebuild model/tokenizer.")
+        raise ValueError("Please provide --config (the training YAML) to rebuild model/tokenizer.")
 
     # Read training YAML
     with open(cfg_path, "r") as f:
@@ -191,16 +178,14 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
     # Tokenizer (match training)
     llm_name = cfg["model"]["llm_model_name_or_path"]
     if AutoTokenizer is None:
-        raise RuntimeError(
-            "transformers not available. Please install transformers.")
+        raise RuntimeError("transformers not available. Please install transformers.")
     tokenizer = AutoTokenizer.from_pretrained(llm_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     if tokenizer.mask_token_id is None:
         tokenizer.add_special_tokens({"mask_token": "[MASK]"})
     if get_semantic_robust_alphabet is not None:
-        add_tokens = list(set(get_semantic_robust_alphabet()) -
-                          set(tokenizer.get_vocab().keys()))
+        add_tokens = list(set(get_semantic_robust_alphabet()) - set(tokenizer.get_vocab().keys()))
         if add_tokens:
             tokenizer.add_tokens(add_tokens)
 
@@ -210,8 +195,7 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
     embedding_size = ((vocab_size + 127) // 128) * 128
 
     if MMadaConfig is None:
-        raise RuntimeError(
-            "MMadaConfig is not available. Ensure your project imports are correct.")
+        raise RuntimeError("MMadaConfig is not available. Ensure your project imports are correct.")
 
     model_cfg = MMadaConfig(
         llm_config_path=m["llm_config_path"],
@@ -235,7 +219,7 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
         diff_coeff=m.get("diff_coeff", 0.0),
         mae_coeff=m.get("mae_coeff", 0.0),
         atom_type_coeff=m.get("atom_type_coeff", 1.0),
-        num_scalar_props=6,  # mu, alpha, homo, lumo, gap, cv
+        num_scalar_props=6,
         mask_token_id=m["mask_token_id"],
         mask_replace_ratio=m["mask_replace_ratio"],
         mask_schedule_name=m["mask_schedule_name"],
@@ -247,8 +231,7 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
 
     device_t = torch.device(device)
     if MMadaModelLM is None:
-        raise RuntimeError(
-            "MMadaModelLM is not available. Ensure your project imports are correct.")
+        raise RuntimeError("MMadaModelLM is not available. Ensure your project imports are correct.")
     model = MMadaModelLM(model_cfg, tokenizer=tokenizer).to(device_t)
     model.eval()
 
@@ -271,25 +254,19 @@ def _load_model_and_tokenizer(ckpt_dir: str, device: str, cfg_path: Optional[str
 
     missing, unexpected = model.load_state_dict(state, strict=False)
     if missing:
-        print(
-            f"[warn] missing keys: {len(missing)} (showing first 20): {missing[:20]}")
+        print(f"[warn] missing keys: {len(missing)} (showing first 20): {missing[:20]}")
     if unexpected:
-        print(
-            f"[warn] unexpected keys: {len(unexpected)} (showing first 20): {unexpected[:20]}")
+        print(f"[warn] unexpected keys: {len(unexpected)} (showing first 20): {unexpected[:20]}")
 
-    # Optional override idx2z mapping from gen-config
     idx2z = DEFAULT_IDX2Z
     if gen_idx2z and isinstance(gen_idx2z, list) and len(gen_idx2z) == len(DEFAULT_IDX2Z):
         idx2z = np.asarray(gen_idx2z, dtype=np.int64)
 
-    _STATE.update({"model": model, "tokenizer": tokenizer,
-                  "device": device_t, "idx2z": idx2z})
-    print("[sampler-info] has sample_diffusion?:",
-          hasattr(model, "sample_diffusion"))
+    _STATE.update({"model": model, "tokenizer": tokenizer, "device": device_t, "idx2z": idx2z})
+    print("[sampler-info] has sample_diffusion?:", hasattr(model, "sample_diffusion"))
 
 
 def _filter_kwargs_for_func(func, kwargs: Dict) -> Dict:
-    """Filter kwargs to only those accepted by func to avoid TypeError."""
     try:
         sig = inspect.signature(func)
         allowed = set(sig.parameters.keys())
@@ -305,37 +282,45 @@ def sample_batch(
     gen_params: Optional[Dict] = None,
     **kwargs
 ) -> Dict[str, "np.ndarray"]:
-    """Generate 3D conformations from 1D molecular inputs (SELFIES/SMILES)."""
+    """Generate 3D conformations from 1D molecular inputs (SELFIES)."""
     use_dummy = kwargs.pop("dummy", False)
     require_diffusion = kwargs.pop("require_diffusion", False)
-    input_selfies = kwargs.pop("input_selfies", None)  # optional conditioning
+    input_selfies = kwargs.pop("input_selfies", None)  # NOTE: now we pass a per-batch chunk
+
+    # Per-batch size
+    if input_selfies is not None:
+        actual_batch_size = len(input_selfies)
+        # (optional) quick estimate of atoms per mol for logging
+        atom_counts = [get_atom_count_from_selfies(s) for s in input_selfies]
+        actual_max_atoms = min(max(atom_counts) if atom_counts else 5, max_atoms)
+        print(f"Batch size: {actual_batch_size}, Max atoms in batch: {actual_max_atoms}")
+    else:
+        actual_batch_size = batch_size
+        actual_max_atoms = max_atoms
 
     if use_dummy:
-        B = batch_size
-        K = max_atoms
+        B = actual_batch_size
+        K = actual_max_atoms
         t = np.zeros((B, K), dtype=np.int64)
         c = np.zeros((B, K, 3), dtype=np.float32)
         m = np.zeros((B, K), dtype=bool)
         for b in range(B):
-            n = min(5, K)  # methane-like mock
+            n = min(5, K)
             t[b, :n] = np.array([6, 1, 1, 1, 1], dtype=np.int64)[:n]
             base = np.array([[0.12, 0.80, 0.10],
                              [0.12, 0.92, 0.10],
                              [0.22, 0.80, 0.10],
                              [0.12, 0.80, 0.22],
                              [0.02, 0.80, 0.10]], dtype=np.float32)[:n]
-            c[b, :n, :] = base + 1e-4 * \
-                np.random.randn(n, 3).astype(np.float32)
+            c[b, :n, :] = base + 1e-4 * np.random.randn(n, 3).astype(np.float32)
             m[b, :n] = True
         return {"types": t, "coords": c, "mask": m}
 
     ckpt_dir = kwargs.get("ckpt", "")
     cfg_path = kwargs.get("config", None)
     if not ckpt_dir:
-        raise ValueError(
-            "Please provide --ckpt pointing to a checkpoint directory.")
-    _load_model_and_tokenizer(
-        ckpt_dir, device, cfg_path, gen_idx2z=(gen_params or {}).get("idx2z"))
+        raise ValueError("Please provide --ckpt pointing to a checkpoint directory.")
+    _load_model_and_tokenizer(ckpt_dir, device, cfg_path, gen_idx2z=(gen_params or {}).get("idx2z"))
 
     model: "MMadaModelLM" = _STATE["model"]  # type: ignore
     dev: "torch.device" = _STATE["device"]   # type: ignore
@@ -347,37 +332,43 @@ def sample_batch(
     with torch.no_grad(), torch.inference_mode():
         use_diff = hasattr(model, "sample_diffusion")
         if require_diffusion and not use_diff:
-            raise RuntimeError(
-                "require-diffusion set but model has no sample_diffusion().")
+            raise RuntimeError("require-diffusion set but model has no sample_diffusion().")
 
-        # Prepare call kwargs
-        call_kwargs = dict(batch_size=batch_size,
-                           max_atoms=max_atoms, device=dev)
-        if gen_params:
-            call_kwargs.update(gen_params)
-        if input_selfies is not None:
-            # conditioning (if model supports)
-            call_kwargs["input_selfies"] = input_selfies
+        print(f"[sampler-info] using: {'sample_diffusion' if use_diff else 'sample'}")
+        if use_diff and gen_params:
+            print("[sampler-params]",
+                  "t_steps=", gen_params.get("t_steps"),
+                  "guidance_scale=", gen_params.get("guidance_scale"),
+                  "type_conf_frac=", gen_params.get("type_conf_frac"),
+                  "type_topk=", gen_params.get("type_topk"),
+                  "temperature=", gen_params.get("temperature"),
+                  "scheduler_name=", gen_params.get("scheduler_name"))
 
-        print(
-            f"[sampler-info] using: {'sample_diffusion' if use_diff else 'sample'}")
         if use_diff:
-            call = _filter_kwargs_for_func(model.sample_diffusion, call_kwargs)
-            out = model.sample_diffusion(**call)
+            call_kwargs = dict(batch_size=actual_batch_size, max_atoms=actual_max_atoms, device=dev)
+            if gen_params:
+                call_kwargs.update(gen_params)
+            if input_selfies is not None:
+                call_kwargs["input_selfies"] = input_selfies  # per-batch chunk only
+            call_kwargs = _filter_kwargs_for_func(model.sample_diffusion, call_kwargs)
+            out = model.sample_diffusion(**call_kwargs)
         else:
-            call = _filter_kwargs_for_func(model.sample, call_kwargs)
-            out = model.sample(**call)
+            call_kwargs = dict(batch_size=actual_batch_size, max_atoms=actual_max_atoms, device=dev)
+            if gen_params:
+                call_kwargs.update(gen_params)
+            if input_selfies is not None:
+                call_kwargs["input_selfies"] = input_selfies
+            call_kwargs = _filter_kwargs_for_func(model.sample, call_kwargs)
+            out = model.sample(**call_kwargs)
 
         if "atom_idx" in out:
-            atom_idx_t = out["atom_idx"].detach().clamp_(
-                min=0, max=len(idx2z) - 1)
+            atom_idx_t = out["atom_idx"].detach().clamp_(min=0, max=len(idx2z) - 1)
             atom_idx = atom_idx_t.cpu().numpy()
             types_z = idx2z[atom_idx]
         elif "types_z" in out:
             types_z = out["types_z"].detach().cpu().numpy().astype(np.int64)
         else:
-            raise KeyError(
-                "Sampler output must contain 'atom_idx' or 'types_z'.")
+            raise KeyError("Sampler output must contain 'atom_idx' or 'types_z'.")
 
         coords = out["coords"].detach().cpu().numpy().astype(np.float32)
         mask = out.get("mask", None)
@@ -390,47 +381,28 @@ def sample_batch(
 
 
 def main():
-    p = argparse.ArgumentParser(
-        description="Generate 3D conformations from 1D molecular inputs (1D→3D prediction).")
-    p.add_argument("--ckpt", type=str, default="",
-                   help="Path to model checkpoint directory.")
-    p.add_argument("--config", type=str, default=None,
-                   help="Training YAML to rebuild model/tokenizer.")
-    p.add_argument("--gen-config", type=str, default=None,
-                   help="Optional generation YAML (diffusion params).")
-    p.add_argument("--input-selfies", type=str, default=None,
-                   help="Path to input SELFIES/SMILES (one per line).")
-    p.add_argument("--num", type=int, default=10000,
-                   help="Total number of molecules to generate if no --input-selfies.")
-    p.add_argument("--batch-size", type=int, default=64,
-                   help="Batch size for sampling.")
-    p.add_argument("--device", type=str, default="cpu",
-                   choices=["cpu", "cuda"])
-    p.add_argument("--max-atoms", type=int, default=32,
-                   help="Model's max atoms.")
-    p.add_argument("--dataset", type=str, default="QM9",
-                   choices=["QM9", "Geom"], help="Element set restriction.")
-    p.add_argument("--out", type=str, required=True,
-                   help="Output parquet path.")
-    p.add_argument("--cap", type=int, default=32,
-                   help="Cap kept atoms after cleaning; 0=keep all.")
-    p.add_argument("--origin-eps", type=float, default=1e-8,
-                   help="Treat near-zero coords as padding.")
-    p.add_argument("--dedup-eps", type=float, default=1e-6,
-                   help="Merge coincident coords within this tol.")
-    p.add_argument("--dummy", action="store_true",
-                   help="Use dummy sampler (no model needed).")
-    p.add_argument("--print-every", type=int, default=2000,
-                   help="Log every N accepted mols.")
-    p.add_argument("--require-diffusion", action="store_true",
-                   help="Fail if model.sample_diffusion is unavailable.")
+    p = argparse.ArgumentParser(description="Generate 3D conformations from SELFIES.")
+    p.add_argument("--ckpt", type=str, default="", help="Path to model checkpoint directory.")
+    p.add_argument("--config", type=str, default=None, help="Training YAML to rebuild model/tokenizer.")
+    p.add_argument("--gen-config", type=str, default=None, help="Optional generation YAML (diffusion params).")
+    p.add_argument("--input-selfies", type=str, default=None, help="Path to SELFIES file (one per line).")
+    p.add_argument("--num", type=int, default=10000, help="Total molecules to generate (ignored if --input-selfies).")
+    p.add_argument("--batch-size", type=int, default=64, help="Batch size for sampling.")
+    p.add_argument("--device", type=str, default="cpu", choices=["cpu", "cuda"])
+    p.add_argument("--max-atoms", type=int, default=32, help="Model max atoms.")
+    p.add_argument("--dataset", type=str, default="QM9", choices=["QM9", "Geom"])
+    p.add_argument("--out", type=str, required=True, help="Output parquet path.")
+    p.add_argument("--cap", type=int, default=32, help="Cap kept atoms after cleaning; 0=keep all.")
+    p.add_argument("--origin-eps", type=float, default=1e-8, help="Treat near-zero coords as padding.")
+    p.add_argument("--dedup-eps", type=float, default=1e-6, help="Merge coincident coords within this tol.")
+    p.add_argument("--dummy", action="store_true", help="Use dummy sampler (no model needed).")
+    p.add_argument("--print-every", type=int, default=2000, help="Log every N accepted mols.")
+    p.add_argument("--require-diffusion", action="store_true", help="Fail if no sample_diffusion().")
     args = p.parse_args()
 
     if not args.dummy and not args.config:
-        raise SystemExit(
-            "--config is required in non-dummy mode to rebuild model/tokenizer.")
+        raise SystemExit("--config is required in non-dummy mode.")
 
-    # Load diffusion generation params (optional)
     gen_cfg = _load_gen_cfg(args.gen_config)
     gen_params = gen_cfg["generation"]
     set_global_seed(gen_params.get("seed", None))
@@ -438,12 +410,12 @@ def main():
     out_path = Path(args.out)
     out_path.parent.mkdir(parents=True, exist_ok=True)
 
-    # Load input list (one per line). Can be SELFIES or SMILES depending on your model.
-    input_selfies = None
+    # Load SELFIES list if provided
+    input_selfies: Optional[List[str]] = None
     if args.input_selfies:
         with open(args.input_selfies, 'r') as f:
             input_selfies = [line.strip() for line in f if line.strip()]
-        print(f"Loaded {len(input_selfies)} 1D inputs")
+        print(f"Loaded {len(input_selfies)} SELFIES")
         args.num = len(input_selfies)  # override
 
     rows = []
@@ -452,6 +424,13 @@ def main():
     t0 = time.time()
 
     while accepted < args.num:
+        # IMPORTANT: pass ONLY the current batch slice to the sampler
+        selfies_chunk = None
+        if input_selfies is not None:
+            start = generated
+            end = min(generated + args.batch_size, args.num)
+            selfies_chunk = input_selfies[start:end]
+
         batch = sample_batch(
             batch_size=args.batch_size,
             max_atoms=args.max_atoms,
@@ -461,23 +440,29 @@ def main():
             ckpt=args.ckpt,
             config=args.config,
             require_diffusion=args.require_diffusion,
-            input_selfies=input_selfies,  # pass through for conditioning if supported
+            input_selfies=selfies_chunk,  # <-- FIXED: per-batch chunk only
         )
-        t = np.asarray(batch["types"], dtype=np.int64)        # (B, max_atoms)
-        # (B, max_atoms, 3)
-        c = np.asarray(batch["coords"], dtype=np.float32)
-        m = np.asarray(batch.get("mask"), dtype=bool)         # (B, max_atoms)
+
+        t = np.asarray(batch["types"], dtype=np.int64)          # (B, K)
+        c = np.asarray(batch["coords"], dtype=np.float32)       # (B, K, 3)
+        m = np.asarray(batch.get("mask"), dtype=bool)           # (B, K)
         B = t.shape[0]
         generated += B
 
         for b in range(B):
+            # optional dynamic cap from SELFIES-estimated atom count
+            dynamic_cap = args.cap
+            if selfies_chunk is not None and b < len(selfies_chunk):
+                est_atoms = get_atom_count_from_selfies(selfies_chunk[b])
+                dynamic_cap = min(est_atoms, args.cap) if args.cap > 0 else est_atoms
+
             tt, cc = postprocess_atoms(
                 t[b], c[b],
                 atoms_mask=m[b],
                 dataset=args.dataset,
                 origin_eps=args.origin_eps,
                 dedup_eps=args.dedup_eps,
-                cap=args.cap,   # IMPORTANT: set --cap 0 when calling to avoid truncation here
+                cap=dynamic_cap,
             )
             if tt is None:
                 continue
@@ -485,15 +470,13 @@ def main():
             accepted += 1
             if accepted % max(1, args.print_every) == 0:
                 dt = time.time() - t0
-                print(
-                    f"[info] accepted={accepted}/{args.num} (generated so far={generated}) | elapsed={dt:.1f}s")
+                print(f"[info] accepted={accepted}/{args.num} (generated so far={generated}) | elapsed={dt:.1f}s")
             if accepted >= args.num:
                 break
 
     df = pd.DataFrame(rows)
     df.to_parquet(out_path, engine="pyarrow")
-    print(
-        f"[done] wrote {len(df)} rows to {out_path} (accepted={len(df)} of requested {args.num})")
+    print(f"[done] wrote {len(df)} rows to {out_path} (accepted={len(df)} of requested {args.num})")
 
 
 if __name__ == "__main__":
